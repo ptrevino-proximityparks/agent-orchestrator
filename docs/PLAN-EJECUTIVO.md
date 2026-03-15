@@ -98,12 +98,19 @@ Transformar `agent-orchestrator` de un orquestador GitHub-centric a un **orquest
 
 ---
 
-### FASE 5: CONFIGURACIÓN (Tareas 5.1-5.3)
+### FASE 5: CONFIGURACIÓN (Tareas 5.1-5.3) ✅ COMPLETADA
 **Objetivo**: YAML config completa para Linear-first mode
 
-- [ ] **5.1** Extender schema YAML con sección `linear:`
-- [ ] **5.2** Wiring de resolución de proyecto en AutoSpawn
-- [ ] **5.3** `ao init --tracker linear` genera config correcta
+- [x] **5.1** Extender schema YAML con sección `linear:`
+- [x] **5.2** Wiring de resolución de proyecto en AutoSpawn
+- [x] **5.3** `ao init --tracker linear` genera config correcta
+
+**Implementado**:
+- LinearConfig type en types.ts
+- LinearConfigSchema con validación Zod
+- LinearReporter usa config global + override por proyecto
+- AutoSpawn usa config.linear.autoSpawn
+- `ao init --auto --tracker linear` genera config completa
 
 **Nueva estructura YAML**:
 ```yaml
@@ -122,6 +129,8 @@ linear:
     enabled: true
     triggerStatus: Todo
 ```
+
+**Commit**: `feat(linear): Phase 5 - Configuration and CLI enhancements`
 
 ---
 
