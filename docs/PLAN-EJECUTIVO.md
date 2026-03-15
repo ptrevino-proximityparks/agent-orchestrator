@@ -82,13 +82,19 @@ Transformar `agent-orchestrator` de un orquestador GitHub-centric a un **orquest
 
 ---
 
-### FASE 4: WEBHOOKS (Tareas 4.1-4.2)
+### FASE 4: WEBHOOKS (Tareas 4.1-4.2) ✅ COMPLETADA
 **Objetivo**: Linear puede triggear acciones en AO
 
-- [ ] **4.1** Endpoint `POST /webhooks/linear` — validación de firma, emit eventos
-- [ ] **4.2** AutoSpawn handler — status change → spawn automático
+- [x] **4.1** Endpoint `POST /webhooks/linear` — validación de firma, emit eventos
+- [x] **4.2** AutoSpawn handler — status change → spawn automático
 
-**Crítico**: Prevenir loops infinitos (bot comments → webhook → bot comments)
+**Implementado**:
+- Verificación HMAC-SHA256 con timing-safe comparison
+- AutoSpawn en transición a status "Todo", "Ready", etc.
+- Prevención de loops: detecta comentarios de bot, usuario API
+- Prevención de duplicados: no spawn si ya existe sesión activa
+
+**Commit**: `feat(linear): Phase 4 - Webhooks and AutoSpawn handler`
 
 ---
 
