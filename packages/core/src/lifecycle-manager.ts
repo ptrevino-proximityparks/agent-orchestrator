@@ -35,6 +35,7 @@ import {
 } from "./types.js";
 import { updateMetadata } from "./metadata.js";
 import { getSessionsDir } from "./paths.js";
+import { createLinearReporter, type LinearReporter } from "./linear-reporter.js";
 
 /** Parse a duration string like "10m", "30s", "1h" to milliseconds. */
 function parseDuration(str: string): number {
@@ -177,6 +178,9 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let polling = false; // re-entrancy guard
   let allCompleteEmitted = false; // guard against repeated all_complete
+
+  // Initialize Linear reporter for Linear-first workflows
+  const linearReporter: LinearReporter = createLinearReporter({ config, registry });
 
   /** Determine current status for a session by polling plugins. */
   async function determineStatus(session: Session): Promise<SessionStatus> {
@@ -474,6 +478,27 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       // Handle transition: notify humans and/or trigger reactions
       const eventType = statusToEventType(oldStatus, newStatus);
       if (eventType) {
+        // Report to Linear if using Linear tracker and session has an issue
+        const project = config.projects[session.projectId];
+        if (project && session.issueId && linearReporter.isEnabled(project)) {
+          const event = createEvent(eventType, {
+            sessionId: session.id,
+            projectId: session.projectId,
+            message: `${session.id}: ${oldStatus} → ${newStatus}`,
+            data: {
+              oldStatus,
+              newStatus,
+              prUrl: session.pr?.url,
+              prTitle: session.pr?.title,
+            },
+          });
+          // Report asynchronously — don't block the lifecycle loop
+          linearReporter.reportEvent(event, session.issueId, project).catch((err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error(`[lifecycle-manager] Linear report failed: ${msg}`);
+          });
+        }
+
         let reactionHandledNotify = false;
         const reactionKey = eventToReactionKey(eventType);
 

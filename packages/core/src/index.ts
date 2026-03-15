@@ -51,6 +51,10 @@ export type { SessionManagerDeps } from "./session-manager.js";
 export { createLifecycleManager } from "./lifecycle-manager.js";
 export type { LifecycleManagerDeps } from "./lifecycle-manager.js";
 
+// Linear reporter — posts orchestrator events to Linear issues
+export { createLinearReporter } from "./linear-reporter.js";
+export type { LinearReporter, LinearReporterConfig, LinearReporterDeps } from "./linear-reporter.js";
+
 // Prompt builder — layered prompt composition
 export { buildPrompt, BASE_AGENT_PROMPT } from "./prompt-builder.js";
 export type { PromptBuildConfig } from "./prompt-builder.js";
