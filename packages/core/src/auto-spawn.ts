@@ -132,16 +132,27 @@ export function createAutoSpawnHandler(deps: AutoSpawnHandlerDeps): AutoSpawnHan
   const { config } = deps;
 
   /**
-   * Get AutoSpawn configuration, merging project-level with global defaults.
+   * Get AutoSpawn configuration, merging global and project-level config.
+   * Global config (config.linear.autoSpawn) provides defaults, project-level overrides.
    */
   function getAutoSpawnConfig(project?: ProjectConfig): AutoSpawnConfig {
-    // Check project-level config
-    const trackerConfig = (project?.tracker as Record<string, unknown> | undefined) ?? {};
-    const autoSpawnConfig = (trackerConfig["autoSpawn"] as Record<string, unknown> | undefined) ?? {};
+    // Get global linear autoSpawn config
+    const globalAutoSpawn = config.linear?.autoSpawn ?? {};
 
-    // Extract settings with defaults
-    const enabled = (autoSpawnConfig["enabled"] as boolean | undefined) ?? true;
-    const triggerStatus = autoSpawnConfig["triggerStatus"] as string | string[] | undefined;
+    // Get project-level config (can override global)
+    const trackerConfig = (project?.tracker as Record<string, unknown> | undefined) ?? {};
+    const projectAutoSpawn = (trackerConfig["autoSpawn"] as Record<string, unknown> | undefined) ?? {};
+
+    // Merge enabled setting (project overrides global)
+    const enabled =
+      (projectAutoSpawn["enabled"] as boolean | undefined) ??
+      globalAutoSpawn.enabled ??
+      true;
+
+    // Merge trigger status (project overrides global)
+    const triggerStatus =
+      (projectAutoSpawn["triggerStatus"] as string | string[] | undefined) ??
+      globalAutoSpawn.triggerStatus;
 
     // Normalize trigger statuses to array
     let triggerStatuses: string[];

@@ -885,6 +885,46 @@ export interface ReactionResult {
 // CONFIGURATION
 // =============================================================================
 
+/**
+ * Linear-first configuration for global Linear settings.
+ * Applied to all projects using tracker: linear
+ */
+export interface LinearConfig {
+  /** Webhook configuration */
+  webhooks?: {
+    /** Enable webhook processing (default: true) */
+    enabled?: boolean;
+    /** Webhook endpoint path (default: /webhooks/linear) */
+    path?: string;
+  };
+
+  /** Status mapping from events to Linear status names */
+  statusMapping?: {
+    /** Status when agent starts working (default: "In Progress") */
+    "agent-spawned"?: string;
+    /** Status when PR is created (default: "In Review") */
+    "pr-created"?: string;
+    /** Status when PR is merged (default: "Done") */
+    "pr-merged"?: string;
+  };
+
+  /** Comment posting configuration */
+  comments?: {
+    /** Enable automatic comments (default: true) */
+    enabled?: boolean;
+    /** Prefix for all bot comments (default: "🤖") */
+    prefix?: string;
+  };
+
+  /** AutoSpawn configuration */
+  autoSpawn?: {
+    /** Enable automatic spawning on status change (default: true) */
+    enabled?: boolean;
+    /** Status name(s) that trigger spawn (default: "Todo") */
+    triggerStatus?: string | string[];
+  };
+}
+
 /** Top-level orchestrator configuration (from agent-orchestrator.yaml) */
 export interface OrchestratorConfig {
   /**
@@ -920,6 +960,9 @@ export interface OrchestratorConfig {
 
   /** Default reaction configs */
   reactions: Record<string, ReactionConfig>;
+
+  /** Linear-first configuration (global settings for Linear tracker) */
+  linear?: LinearConfig;
 }
 
 export interface DefaultPlugins {

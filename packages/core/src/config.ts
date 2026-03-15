@@ -88,6 +88,36 @@ const DefaultPluginsSchema = z.object({
   notifiers: z.array(z.string()).default(["composio", "desktop"]),
 });
 
+const LinearConfigSchema = z
+  .object({
+    webhooks: z
+      .object({
+        enabled: z.boolean().default(true),
+        path: z.string().default("/webhooks/linear"),
+      })
+      .optional(),
+    statusMapping: z
+      .object({
+        "agent-spawned": z.string().default("In Progress"),
+        "pr-created": z.string().default("In Review"),
+        "pr-merged": z.string().default("Done"),
+      })
+      .optional(),
+    comments: z
+      .object({
+        enabled: z.boolean().default(true),
+        prefix: z.string().default("🤖"),
+      })
+      .optional(),
+    autoSpawn: z
+      .object({
+        enabled: z.boolean().default(true),
+        triggerStatus: z.union([z.string(), z.array(z.string())]).default("Todo"),
+      })
+      .optional(),
+  })
+  .optional();
+
 const OrchestratorConfigSchema = z.object({
   port: z.number().default(3000),
   terminalPort: z.number().optional(),
@@ -103,6 +133,7 @@ const OrchestratorConfigSchema = z.object({
     info: ["composio"],
   }),
   reactions: z.record(ReactionConfigSchema).default({}),
+  linear: LinearConfigSchema,
 });
 
 // =============================================================================

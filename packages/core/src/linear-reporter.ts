@@ -190,22 +190,52 @@ export function createLinearReporter(deps: LinearReporterDeps): LinearReporter {
   const { config, registry } = deps;
 
   /**
-   * Extract Linear reporter configuration from project config.
-   * Note: Global linear config will be added in Phase 5 when YAML schema is extended.
+   * Extract Linear reporter configuration from global and project config.
+   * Global config (config.linear) provides defaults, project-level overrides.
    */
   function getReporterConfig(project: ProjectConfig): LinearReporterConfig {
-    // Check for linear-specific config in project tracker config
-    const linearConfig = (project.tracker as Record<string, unknown> | undefined) ?? {};
+    // Get global linear config
+    const globalLinear = config.linear ?? {};
+    const globalComments = globalLinear.comments ?? {};
+    const globalStatusMapping = globalLinear.statusMapping ?? {};
 
-    // Extract nested configurations
-    const commentsConfig = (linearConfig["comments"] ?? {}) as Record<string, unknown>;
-    const statusConfig = (linearConfig["statusMapping"] ?? {}) as Record<string, string>;
+    // Get project-level tracker config (can override global)
+    const projectConfig = (project.tracker as Record<string, unknown> | undefined) ?? {};
+    const projectComments = (projectConfig["comments"] ?? {}) as Record<string, unknown>;
+    const projectStatusMapping = (projectConfig["statusMapping"] ?? {}) as Record<string, string>;
+
+    // Merge global and project status mappings
+    const mergedStatusMapping: Record<string, string> = {
+      ...DEFAULT_STATUS_MAPPING,
+    };
+
+    // Apply global status mapping
+    if (globalStatusMapping["agent-spawned"]) {
+      mergedStatusMapping["session.spawned"] = globalStatusMapping["agent-spawned"];
+      mergedStatusMapping["session.working"] = globalStatusMapping["agent-spawned"];
+    }
+    if (globalStatusMapping["pr-created"]) {
+      mergedStatusMapping["pr.created"] = globalStatusMapping["pr-created"];
+    }
+    if (globalStatusMapping["pr-merged"]) {
+      mergedStatusMapping["pr.merged"] = globalStatusMapping["pr-merged"];
+      mergedStatusMapping["merge.completed"] = globalStatusMapping["pr-merged"];
+    }
+
+    // Apply project-level overrides
+    Object.assign(mergedStatusMapping, projectStatusMapping);
 
     return {
-      commentsEnabled: (commentsConfig["enabled"] as boolean | undefined) ?? true,
-      commentPrefix: (commentsConfig["prefix"] as string | undefined) ?? DEFAULT_COMMENT_PREFIX,
-      statusUpdatesEnabled: (linearConfig["statusUpdates"] as boolean | undefined) ?? true,
-      statusMapping: { ...DEFAULT_STATUS_MAPPING, ...statusConfig },
+      commentsEnabled:
+        (projectComments["enabled"] as boolean | undefined) ??
+        globalComments.enabled ??
+        true,
+      commentPrefix:
+        (projectComments["prefix"] as string | undefined) ??
+        globalComments.prefix ??
+        DEFAULT_COMMENT_PREFIX,
+      statusUpdatesEnabled: (projectConfig["statusUpdates"] as boolean | undefined) ?? true,
+      statusMapping: mergedStatusMapping,
     };
   }
 
