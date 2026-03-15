@@ -457,6 +457,49 @@ export interface Tracker {
 
   /** Optional: create a new issue */
   createIssue?(input: CreateIssueInput, project: ProjectConfig): Promise<Issue>;
+
+  /**
+   * Optional: create a comment on an issue.
+   * For Linear-first workflows where we need to post progress updates,
+   * CI results, or agent status directly to issues.
+   *
+   * @param identifier - Issue identifier (e.g., "PP-45" for Linear, "#123" for GitHub)
+   * @param body - Comment body (supports full markdown)
+   * @param project - Project configuration
+   * @returns The created comment's ID (for deduplication)
+   */
+  createComment?(
+    identifier: string,
+    body: string,
+    project: ProjectConfig,
+  ): Promise<CreateCommentResult>;
+
+  /**
+   * Optional: get issue with full context including relationships and comments.
+   * For Linear-first workflows where agents need complete context.
+   *
+   * @param identifier - Issue identifier (e.g., "PP-45" for Linear)
+   * @param project - Project configuration
+   * @returns Issue with parent, children, comments, and additional metadata
+   */
+  getIssueWithContext?(
+    identifier: string,
+    project: ProjectConfig,
+  ): Promise<IssueWithContext>;
+
+  /**
+   * Optional: update issue status by name (not ID).
+   * Optimized for repeated calls with internal caching of workflow state IDs.
+   *
+   * @param identifier - Issue identifier (e.g., "PP-45")
+   * @param statusName - Target status name (e.g., "In Progress", "Done")
+   * @param project - Project configuration
+   */
+  updateIssueStatus?(
+    identifier: string,
+    statusName: string,
+    project: ProjectConfig,
+  ): Promise<void>;
 }
 
 export interface Issue {
@@ -484,12 +527,55 @@ export interface IssueUpdate {
   comment?: string;
 }
 
+/** Result of creating a comment on an issue */
+export interface CreateCommentResult {
+  /** Unique comment ID */
+  id: string;
+  /** The comment body as stored */
+  body?: string;
+  /** When the comment was created */
+  createdAt?: string;
+}
+
 export interface CreateIssueInput {
   title: string;
   description: string;
   labels?: string[];
   assignee?: string;
   priority?: number;
+  /** Parent issue ID for creating sub-issues (Linear-specific) */
+  parentId?: string;
+}
+
+/**
+ * Extended issue data with relationships and comments.
+ * Used for Linear-first workflows where agents need full context.
+ */
+export interface IssueWithContext extends Issue {
+  /** Parent issue if this is a sub-issue */
+  parent?: {
+    id: string;
+    identifier: string;
+    title: string;
+  };
+  /** Child sub-issues */
+  children?: Array<{
+    id: string;
+    identifier: string;
+    title: string;
+    state: string;
+  }>;
+  /** Recent comments on the issue */
+  comments?: Array<{
+    id: string;
+    body: string;
+    author: string;
+    createdAt: string;
+  }>;
+  /** Associated project name */
+  projectName?: string;
+  /** Team key (e.g., "PP" for ProximityParks) */
+  teamKey?: string;
 }
 
 // =============================================================================

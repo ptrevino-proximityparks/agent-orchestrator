@@ -800,6 +800,106 @@ describe("tracker-linear plugin", () => {
     });
   });
 
+  // ---- createComment -------------------------------------------------------
+
+  describe("createComment", () => {
+    it("creates a comment and returns its ID", async () => {
+      // 1: resolve identifier to UUID
+      mockLinearAPI({ issue: { id: "uuid-123" } });
+      // 2: create comment
+      mockLinearAPI({
+        commentCreate: {
+          success: true,
+          comment: {
+            id: "comment-1",
+            body: "Test comment",
+            createdAt: "2024-01-01T00:00:00Z",
+          },
+        },
+      });
+
+      const result = await tracker.createComment!("INT-123", "Test comment", project);
+      expect(result.id).toBe("comment-1");
+      expect(result.body).toBe("Test comment");
+      expect(result.createdAt).toBe("2024-01-01T00:00:00Z");
+      expect(requestMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("supports full markdown in comment body", async () => {
+      mockLinearAPI({ issue: { id: "uuid-123" } });
+      mockLinearAPI({
+        commentCreate: {
+          success: true,
+          comment: {
+            id: "comment-2",
+            body: "## Heading\n\n- Item 1\n- Item 2\n\n```js\nconst x = 1;\n```",
+            createdAt: "2024-01-01T00:00:00Z",
+          },
+        },
+      });
+
+      const markdownBody = "## Heading\n\n- Item 1\n- Item 2\n\n```js\nconst x = 1;\n```";
+      const result = await tracker.createComment!("INT-123", markdownBody, project);
+      expect(result.id).toBe("comment-2");
+
+      // Verify the mutation received the markdown body
+      const writeCall = requestMock.mock.results[1].value.write.mock.calls[0][0];
+      const body = JSON.parse(writeCall);
+      expect(body.variables.body).toBe(markdownBody);
+    });
+
+    it("handles issue resolution error gracefully (does not throw)", async () => {
+      mockLinearError("Issue not found");
+
+      // Should NOT throw — returns empty ID instead
+      const result = await tracker.createComment!("INT-999", "Test", project);
+      expect(result.id).toBe("");
+      expect(requestMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("handles commentCreate failure gracefully (does not throw)", async () => {
+      mockLinearAPI({ issue: { id: "uuid-123" } });
+      mockLinearError("Rate limit exceeded");
+
+      // Should NOT throw — returns empty ID instead
+      const result = await tracker.createComment!("INT-123", "Test", project);
+      expect(result.id).toBe("");
+      expect(requestMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("handles success=false response gracefully", async () => {
+      mockLinearAPI({ issue: { id: "uuid-123" } });
+      mockLinearAPI({
+        commentCreate: {
+          success: false,
+          comment: null,
+        },
+      });
+
+      const result = await tracker.createComment!("INT-123", "Test", project);
+      expect(result.id).toBe("");
+    });
+
+    it("sends correct GraphQL mutation", async () => {
+      mockLinearAPI({ issue: { id: "uuid-123" } });
+      mockLinearAPI({
+        commentCreate: {
+          success: true,
+          comment: { id: "comment-1", body: "Test", createdAt: "2024-01-01T00:00:00Z" },
+        },
+      });
+
+      await tracker.createComment!("INT-123", "My comment", project);
+
+      // Verify second request (commentCreate) has correct variables
+      const writeCall = requestMock.mock.results[1].value.write.mock.calls[0][0];
+      const body = JSON.parse(writeCall);
+      expect(body.variables.issueId).toBe("uuid-123");
+      expect(body.variables.body).toBe("My comment");
+      expect(body.query).toContain("commentCreate");
+    });
+  });
+
   // ---- linearQuery error handling ----------------------------------------
 
   describe("linearQuery error handling", () => {
