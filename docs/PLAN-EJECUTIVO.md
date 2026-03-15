@@ -134,12 +134,21 @@ linear:
 
 ---
 
-### FASE 6: TEMPLATES Y DOCS (Tareas 6.1-6.3)
+### FASE 6: TEMPLATES Y DOCS (Tareas 6.1-6.3) ✅ COMPLETADA
 **Objetivo**: Documentación y plantillas
 
-- [ ] **6.1** `templates/CLAUDE.md.template` — instrucciones para agentes
-- [ ] **6.2** `examples/linear-first.yaml` — config de ejemplo
-- [ ] **6.3** Actualizar README, SETUP, crear `docs/LINEAR-FIRST.md`
+- [x] **6.1** `templates/CLAUDE.md.template` — instrucciones para agentes
+- [x] **6.2** `examples/linear-first.yaml` — config de ejemplo
+- [x] **6.3** Actualizar README, SETUP, crear `docs/LINEAR-FIRST.md`
+
+**Entregables**:
+- `templates/CLAUDE.md.template` — Instrucciones estándar para agentes Linear-first
+- `examples/linear-first.yaml` — Configuración completa de ejemplo
+- `docs/LINEAR-FIRST.md` — Documentación completa con Quick Start, configuración, troubleshooting
+- README.md actualizado con Option C (Linear-first) y link a docs
+- SETUP.md actualizado con sección Linear-First Mode
+
+**Commit**: `docs(linear): Phase 6 - Templates and documentation`
 
 ---
 

@@ -1,0 +1,189 @@
+# =============================================================================
+# Linear-First Configuration Example
+# =============================================================================
+#
+# This example shows how to configure Agent Orchestrator for Linear-first
+# workflows where Linear is the single source of truth for issues.
+#
+# Key differences from GitHub-centric mode:
+# - Issues are tracked in Linear, not GitHub Issues
+# - Status updates sync to Linear automatically
+# - Webhooks enable auto-spawning when issues move to "Todo"
+# - Comments are posted to Linear issues, not GitHub PRs
+#
+# =============================================================================
+
+# Dashboard port
+port: 3000
+
+# Default plugin selections
+defaults:
+  runtime: tmux
+  agent: claude-code
+  workspace: worktree
+  notifiers:
+    - desktop
+    - slack  # Optional: Add Slack for team notifications
+
+# =============================================================================
+# Linear Global Configuration
+# =============================================================================
+#
+# These settings apply to all projects using tracker: linear
+# Project-level settings can override these defaults
+#
+linear:
+  # Webhook configuration
+  # Set up in Linear: Settings → API → Webhooks
+  webhooks:
+    enabled: true
+    path: /webhooks/linear
+
+  # Map orchestrator events to Linear status names
+  # Customize these to match your Linear workflow states
+  statusMapping:
+    agent-spawned: In Progress    # When agent starts working
+    pr-created: In Review         # When PR is opened
+    pr-merged: Done               # When PR is merged
+
+  # Automatic comment posting to Linear issues
+  comments:
+    enabled: true
+    prefix: "🤖"  # All bot comments start with this
+
+  # Auto-spawn agents when issues move to specific statuses
+  autoSpawn:
+    enabled: true
+    triggerStatus: Todo  # Can be string or array: ["Todo", "Ready"]
+
+# =============================================================================
+# Notifier Configuration
+# =============================================================================
+
+notifiers:
+  slack:
+    plugin: slack
+    webhookUrl: ${SLACK_WEBHOOK_URL}  # Set in environment
+    channel: "#dev-agents"
+
+# =============================================================================
+# Project Configuration
+# =============================================================================
+
+projects:
+  # Example: Main application
+  my-app:
+    name: My Application
+    repo: myorg/my-app
+    path: ~/projects/my-app
+    defaultBranch: main
+    sessionPrefix: myapp
+
+    # Linear tracker configuration
+    tracker:
+      plugin: linear
+      # Team key is extracted from issue identifiers (e.g., APP-123 → APP)
+      # Or specify explicitly:
+      # teamKey: APP
+
+      # Optional: Override global Linear settings for this project
+      # autoSpawn:
+      #   enabled: true
+      #   triggerStatus: Ready to Start
+
+    # Agent-specific configuration
+    agentConfig:
+      permissions: skip  # Skip permission prompts
+      model: claude-sonnet-4-20250514
+
+    # Custom rules for agents working on this project
+    agentRules: |
+      ## Project-Specific Rules
+
+      ### Code Style
+      - Use TypeScript strict mode
+      - Follow existing patterns in the codebase
+      - Write tests for new functionality
+
+      ### Linear Integration
+      - Reference Linear issue ID in commits: "APP-123: description"
+      - Don't manually update Linear - orchestrator handles it
+
+  # Example: API service
+  api-service:
+    name: API Service
+    repo: myorg/api-service
+    path: ~/projects/api-service
+    defaultBranch: main
+    sessionPrefix: api
+
+    tracker:
+      plugin: linear
+      teamKey: API  # Explicit team key
+
+    agentConfig:
+      permissions: skip
+
+    agentRules: |
+      ## API Service Rules
+
+      - Follow OpenAPI spec for all endpoints
+      - Include request/response validation
+      - Write integration tests
+
+# =============================================================================
+# Reaction Configuration
+# =============================================================================
+#
+# Customize how the orchestrator responds to events
+#
+
+reactions:
+  # When CI fails, send the agent a fix message
+  ci-failed:
+    auto: true
+    action: send-to-agent
+    message: |
+      CI is failing. Check the errors with `gh pr checks` and fix them.
+    retries: 2
+    escalateAfter: 2  # Notify human after 2 failed retries
+
+  # When PR is approved and CI passes
+  approved-and-green:
+    auto: false  # Require human to merge
+    action: notify
+    priority: action
+    message: "PR is ready to merge"
+
+  # When agent appears stuck
+  agent-stuck:
+    auto: true
+    action: notify
+    priority: urgent
+    threshold: 10m  # Notify after 10 minutes of no activity
+
+  # When agent needs human input
+  agent-needs-input:
+    auto: true
+    action: notify
+    priority: urgent
+
+# =============================================================================
+# Environment Variables Required
+# =============================================================================
+#
+# Set these in your shell profile or .env file:
+#
+# LINEAR_API_KEY          - Linear API key (required)
+#                           Get at: https://linear.app/settings/api
+#
+# LINEAR_WEBHOOK_SECRET   - Webhook signing secret (optional, for webhooks)
+#                           Set when creating webhook in Linear
+#
+# SLACK_WEBHOOK_URL       - Slack incoming webhook URL (optional)
+#                           For team notifications
+#
+# GITHUB_TOKEN            - GitHub personal access token (for gh CLI)
+#                           Usually set via `gh auth login`
+#
+# =============================================================================
