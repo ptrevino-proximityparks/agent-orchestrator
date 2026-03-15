@@ -65,17 +65,20 @@ Transformar `agent-orchestrator` de un orquestador GitHub-centric a un **orquest
 
 ---
 
-### FASE 3: LINEAR REPORTER (Tareas 3.1-3.2)
+### FASE 3: LINEAR REPORTER (Tareas 3.1-3.2) ✅ COMPLETADA
 **Objetivo**: Reportar eventos del orquestador a Linear automáticamente
 
-- [ ] **3.1** Crear clase `LinearReporter` — suscribe a event bus, postea a Linear
-- [ ] **3.2** Integrar LinearReporter en startup del orquestador
+- [x] **3.1** Crear clase `LinearReporter` — packages/core/src/linear-reporter.ts
+- [x] **3.2** Integrar LinearReporter en lifecycle-manager.ts
 
-**Eventos a manejar**:
-- `session:spawned` → comentario + status "In Progress"
-- `ci:failed` → comentario con logs truncados
-- `pr:created` → comentario + status "In Review"
-- `pr:merged` → comentario + status "Done"
+**Eventos implementados**:
+- `session.spawned` → comentario + status "In Progress"
+- `ci.failing` → comentario con checks fallidos
+- `pr.created` → comentario con link al PR + status "In Review"
+- `pr.merged` → comentario + status "Done"
+- `session.stuck`, `session.needs_input`, `session.errored` → comentarios de alerta
+
+**Commit**: `feat(linear): Phase 3 - LinearReporter for automatic event reporting`
 
 ---
 
