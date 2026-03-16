@@ -151,7 +151,11 @@ export function registerInit(program: Command): void {
       "--smart",
       "Analyze project and generate custom rules (coming soon — requires --auto)",
     )
-    .action(async (opts: { output: string; auto?: boolean; smart?: boolean }) => {
+    .option(
+      "--tracker <type>",
+      "Issue tracker to use (github, linear) — requires --auto",
+    )
+    .action(async (opts: { output: string; auto?: boolean; smart?: boolean; tracker?: string }) => {
       const outputPath = resolve(opts.output);
 
       if (existsSync(outputPath)) {
@@ -167,9 +171,23 @@ export function registerInit(program: Command): void {
         process.exit(1);
       }
 
+      // Validate --tracker requires --auto
+      if (opts.tracker && !opts.auto) {
+        console.error(chalk.red("Error: --tracker requires --auto"));
+        console.log(chalk.dim("Use: ao init --auto --tracker linear"));
+        process.exit(1);
+      }
+
+      // Validate --tracker value
+      if (opts.tracker && !["github", "linear"].includes(opts.tracker)) {
+        console.error(chalk.red(`Error: Invalid tracker "${opts.tracker}"`));
+        console.log(chalk.dim("Valid options: github, linear"));
+        process.exit(1);
+      }
+
       // Handle --auto mode
       if (opts.auto) {
-        await handleAutoMode(outputPath, opts.smart || false);
+        await handleAutoMode(outputPath, opts.smart || false, opts.tracker);
         return;
       }
 
@@ -396,7 +414,11 @@ export function registerInit(program: Command): void {
     });
 }
 
-async function handleAutoMode(outputPath: string, smart: boolean): Promise<void> {
+async function handleAutoMode(
+  outputPath: string,
+  smart: boolean,
+  tracker?: string,
+): Promise<void> {
   const workingDir = cwd();
 
   console.log(chalk.bold.cyan("\n  Agent Orchestrator — Auto Setup\n"));
@@ -461,6 +483,27 @@ async function handleAutoMode(outputPath: string, smart: boolean): Promise<void>
   } else if (port !== DEFAULT_PORT) {
     console.log(chalk.yellow(`  ⚠ Port ${DEFAULT_PORT} is busy — using ${port} instead.`));
   }
+  // Determine tracker to use
+  const useLinear = tracker === "linear" || (tracker === undefined && env.hasLinearKey);
+
+  // Build project config
+  const projectConfig: Record<string, unknown> = {
+    name: projectId,
+    sessionPrefix: generateSessionPrefix(projectId),
+    repo,
+    path,
+    defaultBranch,
+    agentRules,
+  };
+
+  // Add tracker config if using Linear
+  if (useLinear) {
+    projectConfig.tracker = {
+      plugin: "linear",
+      // teamKey will be extracted from issue identifier (e.g., INT-123 → INT)
+    };
+  }
+
   const config: Record<string, unknown> = {
     dataDir: "~/.agent-orchestrator",
     worktreeDir: "~/.worktrees",
@@ -472,16 +515,32 @@ async function handleAutoMode(outputPath: string, smart: boolean): Promise<void>
       notifiers: ["desktop"],
     },
     projects: {
-      [projectId]: {
-        name: projectId,
-        sessionPrefix: generateSessionPrefix(projectId),
-        repo,
-        path,
-        defaultBranch,
-        agentRules,
-      },
+      [projectId]: projectConfig,
     },
   };
+
+  // Add global Linear config when using Linear tracker
+  if (useLinear) {
+    config.linear = {
+      webhooks: {
+        enabled: true,
+        path: "/webhooks/linear",
+      },
+      statusMapping: {
+        "agent-spawned": "In Progress",
+        "pr-created": "In Review",
+        "pr-merged": "Done",
+      },
+      comments: {
+        enabled: true,
+        prefix: "🤖",
+      },
+      autoSpawn: {
+        enabled: true,
+        triggerStatus: "Todo",
+      },
+    };
+  }
 
   // Write config
   const yamlContent = yamlStringify(config, { indent: 2 });
@@ -489,6 +548,29 @@ async function handleAutoMode(outputPath: string, smart: boolean): Promise<void>
 
   // Show success message
   console.log(chalk.green(`✓ Config written to ${outputPath}\n`));
+
+  // Show Linear-specific info
+  if (useLinear) {
+    console.log(chalk.green("✓ Linear-first mode enabled\n"));
+
+    if (!env.hasLinearKey) {
+      console.log(chalk.yellow("⚠ LINEAR_API_KEY not found in environment"));
+      console.log(chalk.dim("  Set it in your shell profile or .env file"));
+      console.log(chalk.dim("  Get your key at: https://linear.app/settings/api\n"));
+    }
+
+    console.log(chalk.bold("Linear Configuration:\n"));
+    console.log(chalk.dim("  • Issues are the source of truth (not GitHub Issues)"));
+    console.log(chalk.dim("  • AutoSpawn: Move issue to 'Todo' → agent starts"));
+    console.log(chalk.dim("  • Status updates: Agent progress syncs to Linear"));
+    console.log(chalk.dim("  • Comments: Bot posts progress to Linear issues\n"));
+
+    console.log(chalk.bold("Webhook Setup (optional):\n"));
+    console.log(chalk.dim("  1. Go to Linear Settings → API → Webhooks"));
+    console.log(chalk.dim("  2. Create webhook pointing to:"));
+    console.log(chalk.cyan("     https://your-domain/api/webhooks/linear"));
+    console.log(chalk.dim("  3. Set LINEAR_WEBHOOK_SECRET in your environment\n"));
+  }
 
   // Warn if placeholder repo value is used
   if (hasPlaceholderRepo) {

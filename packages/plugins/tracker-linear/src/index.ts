@@ -13,9 +13,11 @@ import type {
   PluginModule,
   Tracker,
   Issue,
+  IssueWithContext,
   IssueFilters,
   IssueUpdate,
   CreateIssueInput,
+  CreateCommentResult,
   ProjectConfig,
 } from "@composio/ao-core";
 import type { Composio } from "@composio/core";
@@ -265,6 +267,51 @@ const ISSUE_FIELDS = `
   assignee { name displayName }
   team { key }
 `;
+
+// ---------------------------------------------------------------------------
+// Workflow state cache
+// ---------------------------------------------------------------------------
+
+/**
+ * In-memory cache of workflow states per team.
+ * Key: teamId, Value: Map of state name → state ID
+ * This avoids repeated GraphQL queries for status transitions.
+ */
+const workflowStateCache = new Map<string, Map<string, string>>();
+
+/**
+ * Get workflow states for a team, using cache if available.
+ */
+async function getWorkflowStates(
+  query: GraphQLTransport,
+  teamId: string,
+): Promise<Map<string, string>> {
+  const cached = workflowStateCache.get(teamId);
+  if (cached) {
+    return cached;
+  }
+
+  const data = await query<{
+    workflowStates: { nodes: Array<{ id: string; name: string; type: string }> };
+  }>(
+    `query($teamId: ID!) {
+      workflowStates(filter: { team: { id: { eq: $teamId } } }) {
+        nodes { id name type }
+      }
+    }`,
+    { teamId },
+  );
+
+  const stateMap = new Map<string, string>();
+  for (const state of data.workflowStates.nodes) {
+    stateMap.set(state.name, state.id);
+    // Also map by type for fallback (e.g., "completed" → id)
+    stateMap.set(`__type__${state.type}`, state.id);
+  }
+
+  workflowStateCache.set(teamId, stateMap);
+  return stateMap;
+}
 
 // ---------------------------------------------------------------------------
 // Tracker implementation
@@ -570,6 +617,77 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
       }
     },
 
+    async createComment(
+      identifier: string,
+      body: string,
+      _project: ProjectConfig,
+    ): Promise<CreateCommentResult> {
+      // Resolve identifier to UUID (Linear accepts both, but mutations need UUID)
+      let issueUuid: string;
+      try {
+        const issueData = await query<{
+          issue: { id: string };
+        }>(
+          `query($id: String!) {
+            issue(id: $id) {
+              id
+            }
+          }`,
+          { id: identifier },
+        );
+        issueUuid = issueData.issue.id;
+      } catch (err) {
+        // Log error but don't crash — orchestrator must continue
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[tracker-linear] Failed to resolve issue ${identifier}: ${msg}`);
+        // Return a placeholder result so caller knows the comment wasn't created
+        return { id: "" };
+      }
+
+      // Create the comment via GraphQL mutation
+      try {
+        const data = await query<{
+          commentCreate: {
+            success: boolean;
+            comment: {
+              id: string;
+              body: string;
+              createdAt: string;
+            };
+          };
+        }>(
+          `mutation($issueId: String!, $body: String!) {
+            commentCreate(input: { issueId: $issueId, body: $body }) {
+              success
+              comment {
+                id
+                body
+                createdAt
+              }
+            }
+          }`,
+          { issueId: issueUuid, body },
+        );
+
+        if (!data.commentCreate.success) {
+          console.error(`[tracker-linear] commentCreate returned success=false for ${identifier}`);
+          return { id: "" };
+        }
+
+        return {
+          id: data.commentCreate.comment.id,
+          body: data.commentCreate.comment.body,
+          createdAt: data.commentCreate.comment.createdAt,
+        };
+      } catch (err) {
+        // Log error but don't crash — the orchestrator must not fail
+        // because of a Linear API failure
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[tracker-linear] Failed to create comment on ${identifier}: ${msg}`);
+        return { id: "" };
+      }
+    },
+
     async createIssue(input: CreateIssueInput, project: ProjectConfig): Promise<Issue> {
       const teamId = project.tracker?.["teamId"];
       if (!teamId) {
@@ -586,18 +704,24 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
         variables["priority"] = input.priority;
       }
 
+      // Support for sub-issues via parentId
+      if (input.parentId) {
+        variables["parentId"] = input.parentId;
+      }
+
       const data = await query<{
         issueCreate: {
           success: boolean;
           issue: LinearIssueNode;
         };
       }>(
-        `mutation($title: String!, $description: String!, $teamId: String!, $priority: Int) {
+        `mutation($title: String!, $description: String!, $teamId: String!, $priority: Int, $parentId: String) {
           issueCreate(input: {
             title: $title,
             description: $description,
             teamId: $teamId,
-            priority: $priority
+            priority: $priority,
+            parentId: $parentId
           }) {
             success
             issue {
@@ -695,6 +819,154 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
       }
 
       return issue;
+    },
+
+    async updateIssueStatus(
+      identifier: string,
+      statusName: string,
+      _project: ProjectConfig,
+    ): Promise<void> {
+      // Resolve identifier to UUID and get team ID
+      const issueData = await query<{
+        issue: { id: string; team: { id: string } };
+      }>(
+        `query($id: String!) {
+          issue(id: $id) {
+            id
+            team { id }
+          }
+        }`,
+        { id: identifier },
+      );
+
+      const issueUuid = issueData.issue.id;
+      const teamId = issueData.issue.team.id;
+
+      // Get workflow states from cache (or fetch and cache)
+      const stateMap = await getWorkflowStates(query, teamId);
+
+      // Look up the state ID by name
+      const stateId = stateMap.get(statusName);
+      if (!stateId) {
+        const availableStates = [...stateMap.keys()].filter((k) => !k.startsWith("__type__"));
+        throw new Error(
+          `Status "${statusName}" not found for team. Available: ${availableStates.join(", ")}`,
+        );
+      }
+
+      // Update the issue status
+      await query(
+        `mutation($id: String!, $stateId: String!) {
+          issueUpdate(id: $id, input: { stateId: $stateId }) {
+            success
+          }
+        }`,
+        { id: issueUuid, stateId },
+      );
+    },
+
+    async getIssueWithContext(
+      identifier: string,
+      _project: ProjectConfig,
+    ): Promise<IssueWithContext> {
+      const data = await query<{
+        issue: LinearIssueNode & {
+          parent?: {
+            id: string;
+            identifier: string;
+            title: string;
+          };
+          children: {
+            nodes: Array<{
+              id: string;
+              identifier: string;
+              title: string;
+              state: { name: string };
+            }>;
+          };
+          comments: {
+            nodes: Array<{
+              id: string;
+              body: string;
+              createdAt: string;
+              user: { name: string; displayName: string } | null;
+            }>;
+          };
+          project?: {
+            name: string;
+          };
+        };
+      }>(
+        `query($id: String!) {
+          issue(id: $id) {
+            ${ISSUE_FIELDS}
+            parent {
+              id
+              identifier
+              title
+            }
+            children {
+              nodes {
+                id
+                identifier
+                title
+                state { name }
+              }
+            }
+            comments(first: 20) {
+              nodes {
+                id
+                body
+                createdAt
+                user { name displayName }
+              }
+            }
+            project {
+              name
+            }
+          }
+        }`,
+        { id: identifier },
+      );
+
+      const node = data.issue;
+      return {
+        // Base Issue fields
+        id: node.identifier,
+        title: node.title,
+        description: node.description ?? "",
+        url: node.url,
+        state: mapLinearState(node.state.type),
+        labels: node.labels.nodes.map((l) => l.name),
+        assignee: node.assignee?.displayName ?? node.assignee?.name,
+        priority: node.priority,
+
+        // Extended context fields
+        parent: node.parent
+          ? {
+              id: node.parent.id,
+              identifier: node.parent.identifier,
+              title: node.parent.title,
+            }
+          : undefined,
+
+        children: node.children.nodes.map((child) => ({
+          id: child.id,
+          identifier: child.identifier,
+          title: child.title,
+          state: child.state.name,
+        })),
+
+        comments: node.comments.nodes.map((comment) => ({
+          id: comment.id,
+          body: comment.body,
+          author: comment.user?.displayName ?? comment.user?.name ?? "Unknown",
+          createdAt: comment.createdAt,
+        })),
+
+        projectName: node.project?.name,
+        teamKey: node.team.key,
+      };
     },
   };
 }

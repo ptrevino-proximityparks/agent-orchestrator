@@ -63,6 +63,15 @@ cd ~/your-project && ao init --auto
 ao start
 ```
 
+**Option C — Linear-first mode (Linear as source of truth):**
+
+```bash
+ao init --auto --tracker linear
+ao start
+```
+
+See [Linear-First Mode](docs/LINEAR-FIRST.md) for bidirectional sync, auto-spawn on status change, and automatic progress updates.
+
 Then spawn agents:
 
 ```bash
@@ -180,6 +189,7 @@ See [CLAUDE.md](CLAUDE.md) for code conventions and architecture details.
 | Doc | What it covers |
 |-----|---------------|
 | [Setup Guide](SETUP.md) | Detailed installation and configuration |
+| [Linear-First Mode](docs/LINEAR-FIRST.md) | Use Linear as single source of truth for issues |
 | [Examples](examples/) | Config templates (GitHub, Linear, multi-project, auto-merge) |
 | [CLAUDE.md](CLAUDE.md) | Architecture, conventions, plugin pattern |
 | [Troubleshooting](TROUBLESHOOTING.md) | Common issues and fixes |

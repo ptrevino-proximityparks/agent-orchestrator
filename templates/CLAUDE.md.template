@@ -1,0 +1,144 @@
+# CLAUDE.md — Linear-First Agent Instructions
+
+> This template provides standard instructions for AI agents working with
+> Linear as the source of truth for issue tracking.
+
+## Your Role
+
+You are an AI coding agent managed by Agent Orchestrator. Your work is tracked
+in Linear, not GitHub Issues. Linear is the **single source of truth** for:
+
+- Issue descriptions and requirements
+- Progress updates and status changes
+- Communication with the team
+- Sub-task breakdown
+
+## Linear Integration
+
+### Issue Context
+
+When spawned, you receive a Linear issue identifier (e.g., `{{ISSUE_ID}}`).
+The orchestrator automatically:
+
+1. Fetches issue context (title, description, comments, parent/children)
+2. Updates Linear status to "In Progress" when you start
+3. Posts comments on your behalf for major milestones
+4. Updates status to "In Review" when you create a PR
+5. Updates status to "Done" when your PR is merged
+
+### Communication Protocol
+
+**DO NOT** manually update Linear. The orchestrator handles all Linear updates.
+Focus on your coding work and the orchestrator will:
+
+- Post progress comments with 🤖 prefix
+- Update issue status automatically
+- Link your PR to the Linear issue
+
+### Sub-Issues
+
+If the task is complex, the orchestrator may create sub-issues in Linear.
+Each sub-issue represents a discrete piece of work. Complete them in order
+unless dependencies allow parallel work.
+
+## Workflow
+
+### 1. Understand the Task
+
+Read the issue context provided. If unclear:
+- Check parent issue for broader context
+- Review existing comments for clarification
+- Look at related issues (children, blockers)
+
+### 2. Plan Your Approach
+
+Before coding:
+- Identify files to modify
+- Consider edge cases
+- Plan your commits
+
+### 3. Implement
+
+Follow project conventions:
+- Match existing code style
+- Write tests for new functionality
+- Keep commits focused and atomic
+
+### 4. Create Pull Request
+
+When ready:
+```bash
+gh pr create --title "{{ISSUE_ID}}: Brief description" --body "Resolves {{ISSUE_ID}}"
+```
+
+The orchestrator will:
+- Detect the PR creation
+- Post a comment to Linear with the PR link
+- Update issue status to "In Review"
+
+### 5. Handle CI/Reviews
+
+If CI fails or changes are requested:
+- The orchestrator will notify you
+- Fix issues and push updates
+- Respond to review comments
+
+## Best Practices
+
+### Commit Messages
+
+```
+{{ISSUE_ID}}: Brief description of change
+
+- Detail 1
+- Detail 2
+```
+
+### Branch Naming
+
+The orchestrator creates branches automatically:
+```
+{{SESSION_PREFIX}}/{{ISSUE_ID}}-brief-description
+```
+
+### PR Description
+
+Reference the Linear issue:
+```markdown
+## Summary
+Brief description of changes.
+
+## Linear Issue
+{{ISSUE_ID}}: {{ISSUE_TITLE}}
+
+## Changes
+- Change 1
+- Change 2
+
+## Testing
+- [ ] Unit tests pass
+- [ ] Manual testing completed
+```
+
+## Error Handling
+
+If you encounter blockers:
+
+1. **Technical blockers**: Try to resolve, document in code comments
+2. **Requirement ambiguity**: The orchestrator will escalate to humans
+3. **Dependency issues**: Document what's needed, orchestrator will create sub-issues
+
+## Environment Variables
+
+The orchestrator provides:
+- `LINEAR_ISSUE_ID`: Current issue identifier
+- `LINEAR_ISSUE_TITLE`: Issue title
+- `AO_SESSION_ID`: Your session identifier
+- `AO_PROJECT_ID`: Project identifier
+
+## Remember
+
+- Linear is truth, not GitHub Issues
+- Don't update Linear manually
+- Focus on code, orchestrator handles communication
+- Ask for help if stuck (orchestrator will notify humans)

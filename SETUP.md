@@ -350,6 +350,48 @@ gh auth status
 echo $LINEAR_API_KEY  # Should print your key
 ```
 
+### Linear-First Mode
+
+For teams using Linear as the single source of truth, use **Linear-first mode** which provides:
+
+- **Bidirectional sync** — Agent progress automatically updates Linear issues
+- **Auto-spawn** — Move an issue to "Todo" in Linear → agent starts automatically
+- **Automatic status updates** — Issues transition through "In Progress" → "In Review" → "Done"
+- **Comments** — Progress milestones posted to Linear issues
+
+**Quick setup:**
+
+```bash
+ao init --auto --tracker linear
+```
+
+**Or manual configuration:**
+
+```yaml
+linear:
+  webhooks:
+    enabled: true
+    path: /webhooks/linear
+  statusMapping:
+    agent-spawned: In Progress
+    pr-created: In Review
+    pr-merged: Done
+  comments:
+    enabled: true
+    prefix: "🤖"
+  autoSpawn:
+    enabled: true
+    triggerStatus: Todo
+
+projects:
+  my-app:
+    tracker:
+      plugin: linear
+      teamKey: APP  # Your Linear team key (e.g., APP-123 → APP)
+```
+
+See [Linear-First Mode documentation](docs/LINEAR-FIRST.md) for complete setup including webhooks.
+
 ### Slack
 
 **Setup:**
