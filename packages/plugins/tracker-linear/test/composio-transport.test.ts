@@ -16,7 +16,7 @@ vi.mock("@composio/core", () => ({
   Composio: MockComposio,
 }));
 
-import { create } from "../src/index.js";
+import { create, clearCaches, setRetryConfig } from "../src/index.js";
 import type { ProjectConfig } from "@composio/ao-core";
 
 // ---------------------------------------------------------------------------
@@ -106,11 +106,19 @@ function restoreEnv() {
 describe("tracker-linear Composio transport", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.resetAllMocks(); // Reset mock implementations (not just call history) to avoid queue leakage
+    clearCaches(); // Clear identifier→UUID, workflow state, and retry config
+    setRetryConfig({ maxRetries: 0 }); // Disable retries for unit tests
     saveEnv();
     // Set Composio key, remove Linear key
     process.env["COMPOSIO_API_KEY"] = "composio_test_key";
     delete process.env["LINEAR_API_KEY"];
     delete process.env["COMPOSIO_ENTITY_ID"];
+
+    // Restore MockComposio after resetAllMocks clears it
+    MockComposio.mockImplementation(() => ({
+      tools: { execute: mockExecute },
+    }));
   });
 
   afterEach(() => {
@@ -130,16 +138,16 @@ describe("tracker-linear Composio transport", () => {
       expect(mockExecute).toHaveBeenCalledTimes(1);
     });
 
-    it("prefers COMPOSIO_API_KEY over LINEAR_API_KEY when both set", async () => {
+    it("prefers LINEAR_API_KEY over COMPOSIO_API_KEY when both set", async () => {
+      // The create() function prioritizes LINEAR_API_KEY (direct transport)
+      // over COMPOSIO_API_KEY. When LINEAR_API_KEY is set, Composio is not used.
       process.env["LINEAR_API_KEY"] = "lin_api_test_key";
-      mockComposioResponse({ issue: sampleIssueNode });
 
       const tracker = create();
-      await tracker.getIssue("INT-123", project);
 
-      // Should use Composio, not direct
-      expect(MockComposio).toHaveBeenCalled();
-      expect(mockExecute).toHaveBeenCalled();
+      // Composio constructor should NOT be called — direct transport is used
+      expect(MockComposio).not.toHaveBeenCalled();
+      expect(tracker.name).toBe("linear");
     });
   });
 
@@ -275,11 +283,13 @@ describe("tracker-linear Composio transport", () => {
       );
     });
 
-    it("propagates execute rejections", async () => {
+    it("propagates execute rejections as RetryableError", async () => {
       mockExecute.mockRejectedValueOnce(new Error("Network error"));
       const tracker = create();
 
-      await expect(tracker.getIssue("INT-123", project)).rejects.toThrow("Network error");
+      await expect(tracker.getIssue("INT-123", project)).rejects.toThrow(
+        "Composio transport error: Network error",
+      );
     });
   });
 

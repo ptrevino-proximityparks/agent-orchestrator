@@ -12,15 +12,15 @@ defaults:
 projects:
   ao:
     name: Agent Orchestrator
-    repo: ComposioHQ/agent-orchestrator
-    path: ~/agent-orchestrator
+    repo: ptrevino-proximityparks/agent-orquestrator
+    path: ~/Projects/agent-orquestrator
     defaultBranch: main
     sessionPrefix: ao
     scm:
       plugin: github
     tracker:
       plugin: linear
-      teamId: "2a6e9b1b-19cd-4e30-b5bd-7b34dc491c7e"
+      teamId: "d74813c3-16ef-4b18-9a66-ebf976ea4ce4"
     symlinks: [.claude]
     postCreate:
       - "pnpm install"

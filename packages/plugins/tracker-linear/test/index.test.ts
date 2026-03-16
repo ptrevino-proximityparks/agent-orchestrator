@@ -11,7 +11,7 @@ vi.mock("node:https", () => ({
   request: requestMock,
 }));
 
-import { create, manifest } from "../src/index.js";
+import { create, manifest, clearCaches, RetryableError, setRetryConfig } from "../src/index.js";
 import type { ProjectConfig } from "@composio/ao-core";
 
 // ---------------------------------------------------------------------------
@@ -47,6 +47,16 @@ const sampleIssueNode = {
   labels: { nodes: [{ name: "bug" }, { name: "high-priority" }] },
   assignee: { name: "Alice Smith", displayName: "Alice" },
   team: { key: "INT" },
+};
+
+/** Extended version with fields used by generatePrompt's enriched query */
+const sampleIssueNodeEnriched = {
+  ...sampleIssueNode,
+  dueDate: null as string | null,
+  estimate: null as number | null,
+  project: null as { name: string; state: string } | null,
+  cycle: null as { name: string | null; number: number; startsAt: string; endsAt: string } | null,
+  parent: null as { identifier: string; title: string } | null,
 };
 
 // ---------------------------------------------------------------------------
@@ -111,16 +121,16 @@ function mockLinearError(message: string) {
 }
 
 /** Queue an HTTP-level error (non-200 status). */
-function mockHTTPError(statusCode: number, body: string) {
+function mockHTTPError(statusCode: number, body: string, headers: Record<string, string> = {}) {
   requestMock.mockImplementationOnce(
     (
       _opts: Record<string, unknown>,
-      callback: (res: EventEmitter & { statusCode: number }) => void,
+      callback: (res: EventEmitter & { statusCode: number; headers: Record<string, string> }) => void,
     ) => {
       const req = Object.assign(new EventEmitter(), {
         write: vi.fn(),
         end: vi.fn(() => {
-          const res = Object.assign(new EventEmitter(), { statusCode });
+          const res = Object.assign(new EventEmitter(), { statusCode, headers });
           callback(res);
           process.nextTick(() => {
             res.emit("data", Buffer.from(body));
@@ -145,6 +155,9 @@ describe("tracker-linear plugin", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    clearCaches(); // Clear identifier→UUID, workflow state, rate limit, and retry config
+    // Disable retries for all tests by default — retry-specific tests re-enable
+    setRetryConfig({ maxRetries: 0 });
     savedApiKey = process.env["LINEAR_API_KEY"];
     process.env["LINEAR_API_KEY"] = "lin_api_test_key";
     tracker = create();
@@ -271,7 +284,7 @@ describe("tracker-linear plugin", () => {
     it("throws on HTTP errors", async () => {
       mockHTTPError(500, "Internal Server Error");
       await expect(tracker.getIssue("INT-123", project)).rejects.toThrow(
-        "Linear API returned HTTP 500",
+        "Linear API server error (HTTP 500)",
       );
     });
   });
@@ -329,7 +342,7 @@ describe("tracker-linear plugin", () => {
 
   describe("generatePrompt", () => {
     it("includes title, URL, and description", async () => {
-      mockLinearAPI({ issue: sampleIssueNode });
+      mockLinearAPI({ issue: sampleIssueNodeEnriched });
       const prompt = await tracker.generatePrompt("INT-123", project);
       expect(prompt).toContain("INT-123");
       expect(prompt).toContain("Fix login bug");
@@ -338,13 +351,13 @@ describe("tracker-linear plugin", () => {
     });
 
     it("includes labels when present", async () => {
-      mockLinearAPI({ issue: sampleIssueNode });
+      mockLinearAPI({ issue: sampleIssueNodeEnriched });
       const prompt = await tracker.generatePrompt("INT-123", project);
       expect(prompt).toContain("bug, high-priority");
     });
 
     it("includes priority", async () => {
-      mockLinearAPI({ issue: sampleIssueNode });
+      mockLinearAPI({ issue: sampleIssueNodeEnriched });
       const prompt = await tracker.generatePrompt("INT-123", project);
       expect(prompt).toContain("High");
     });
@@ -358,8 +371,9 @@ describe("tracker-linear plugin", () => {
         4: "Low",
       };
       for (const [num, name] of Object.entries(priorities)) {
+        clearCaches(); // Clear identifier cache between iterations
         mockLinearAPI({
-          issue: { ...sampleIssueNode, priority: Number(num) },
+          issue: { ...sampleIssueNodeEnriched, priority: Number(num) },
         });
         const prompt = await tracker.generatePrompt("INT-123", project);
         expect(prompt).toContain(name);
@@ -368,7 +382,7 @@ describe("tracker-linear plugin", () => {
 
     it("omits description section when empty", async () => {
       mockLinearAPI({
-        issue: { ...sampleIssueNode, description: null },
+        issue: { ...sampleIssueNodeEnriched, description: null },
       });
       const prompt = await tracker.generatePrompt("INT-123", project);
       expect(prompt).not.toContain("## Description");
@@ -376,10 +390,59 @@ describe("tracker-linear plugin", () => {
 
     it("omits labels line when no labels", async () => {
       mockLinearAPI({
-        issue: { ...sampleIssueNode, labels: { nodes: [] } },
+        issue: { ...sampleIssueNodeEnriched, labels: { nodes: [] } },
       });
       const prompt = await tracker.generatePrompt("INT-123", project);
       expect(prompt).not.toContain("Labels:");
+    });
+
+    it("includes project name when present", async () => {
+      mockLinearAPI({
+        issue: {
+          ...sampleIssueNodeEnriched,
+          project: { name: "Q1 Release", state: "started" },
+        },
+      });
+      const prompt = await tracker.generatePrompt("INT-123", project);
+      expect(prompt).toContain("Project: Q1 Release (started)");
+    });
+
+    it("includes cycle info when present", async () => {
+      mockLinearAPI({
+        issue: {
+          ...sampleIssueNodeEnriched,
+          cycle: { name: "Sprint 5", number: 5, startsAt: "2026-03-01", endsAt: "2026-03-15" },
+        },
+      });
+      const prompt = await tracker.generatePrompt("INT-123", project);
+      expect(prompt).toContain("Cycle: Sprint 5 (ends 2026-03-15)");
+    });
+
+    it("includes due date when present", async () => {
+      mockLinearAPI({
+        issue: { ...sampleIssueNodeEnriched, dueDate: "2026-03-20" },
+      });
+      const prompt = await tracker.generatePrompt("INT-123", project);
+      expect(prompt).toContain("Due date: 2026-03-20");
+    });
+
+    it("includes parent issue when present", async () => {
+      mockLinearAPI({
+        issue: {
+          ...sampleIssueNodeEnriched,
+          parent: { identifier: "INT-100", title: "Epic: Auth Improvements" },
+        },
+      });
+      const prompt = await tracker.generatePrompt("INT-123", project);
+      expect(prompt).toContain("Parent issue: INT-100");
+    });
+
+    it("includes estimate when present", async () => {
+      mockLinearAPI({
+        issue: { ...sampleIssueNodeEnriched, estimate: 3 },
+      });
+      const prompt = await tracker.generatePrompt("INT-123", project);
+      expect(prompt).toContain("Estimate: 3 points");
     });
   });
 
@@ -498,28 +561,28 @@ describe("tracker-linear plugin", () => {
     };
 
     it("changes state to closed (completed)", async () => {
-      // 1st: resolve identifier to UUID
+      // 1st: resolve identifier to UUID (cached after this)
       mockLinearAPI({ issue: { id: "uuid-123", team: { id: "team-1" } } });
-      // 2nd: fetch workflow states
+      // 2nd: fetch workflow states (via getWorkflowStates, cached after this)
       mockLinearAPI(workflowStates);
-      // 3rd: issueUpdate mutation
+      // 3rd: consolidated issueUpdate mutation
       mockLinearAPI({ issueUpdate: { success: true } });
 
       await tracker.updateIssue!("INT-123", { state: "closed" }, project);
       expect(requestMock).toHaveBeenCalledTimes(3);
     });
 
-    it("changes state to open (unstarted)", async () => {
+    it("changes state to open (unstarted) — uses consolidated input", async () => {
       mockLinearAPI({ issue: { id: "uuid-123", team: { id: "team-1" } } });
       mockLinearAPI(workflowStates);
       mockLinearAPI({ issueUpdate: { success: true } });
 
       await tracker.updateIssue!("INT-123", { state: "open" }, project);
 
-      // Verify the mutation uses the unstarted state ID
+      // Verify the mutation uses consolidated $input with stateId
       const writeCall = requestMock.mock.results[2].value.write.mock.calls[0][0];
       const body = JSON.parse(writeCall);
-      expect(body.variables.stateId).toBe("state-1");
+      expect(body.variables.input.stateId).toBe("state-1");
     });
 
     it("changes state to in_progress (started)", async () => {
@@ -531,7 +594,7 @@ describe("tracker-linear plugin", () => {
 
       const writeCall = requestMock.mock.results[2].value.write.mock.calls[0][0];
       const body = JSON.parse(writeCall);
-      expect(body.variables.stateId).toBe("state-2");
+      expect(body.variables.input.stateId).toBe("state-2");
     });
 
     it("throws when target workflow state is not found", async () => {
@@ -548,7 +611,7 @@ describe("tracker-linear plugin", () => {
       );
     });
 
-    it("adds a comment", async () => {
+    it("adds a comment (no issueUpdate needed)", async () => {
       mockLinearAPI({ issue: { id: "uuid-123", team: { id: "team-1" } } });
       mockLinearAPI({ commentCreate: { success: true } });
 
@@ -561,12 +624,12 @@ describe("tracker-linear plugin", () => {
       expect(body.variables.body).toBe("Working on this");
     });
 
-    it("handles state change + comment together", async () => {
+    it("handles state change + comment together (1 issueUpdate + 1 commentCreate)", async () => {
       // 1: resolve identifier
       mockLinearAPI({ issue: { id: "uuid-123", team: { id: "team-1" } } });
       // 2: workflow states
       mockLinearAPI(workflowStates);
-      // 3: issueUpdate (state)
+      // 3: consolidated issueUpdate (state)
       mockLinearAPI({ issueUpdate: { success: true } });
       // 4: commentCreate
       mockLinearAPI({ commentCreate: { success: true } });
@@ -575,14 +638,14 @@ describe("tracker-linear plugin", () => {
       expect(requestMock).toHaveBeenCalledTimes(4);
     });
 
-    it("updates assignee by resolving display name to ID", async () => {
+    it("updates assignee by resolving display name to ID — consolidated", async () => {
       // 1: resolve identifier
       mockLinearAPI({ issue: { id: "uuid-123", team: { id: "team-1" } } });
-      // 2: user lookup
+      // 2: user lookup (in parallel via Promise.all)
       mockLinearAPI({
         users: { nodes: [{ id: "user-1", displayName: "Alice", name: "Alice Smith" }] },
       });
-      // 3: issueUpdate (assignee)
+      // 3: consolidated issueUpdate (assignee)
       mockLinearAPI({ issueUpdate: { success: true } });
 
       await tracker.updateIssue!("INT-123", { assignee: "Alice" }, project);
@@ -590,15 +653,14 @@ describe("tracker-linear plugin", () => {
 
       const writeCall = requestMock.mock.results[2].value.write.mock.calls[0][0];
       const body = JSON.parse(writeCall);
-      expect(body.variables.assigneeId).toBe("user-1");
+      expect(body.variables.input.assigneeId).toBe("user-1");
     });
 
-    it("updates labels additively (merges with existing)", async () => {
+    it("updates labels additively (merges with existing) — consolidated", async () => {
       // 1: resolve identifier
       mockLinearAPI({ issue: { id: "uuid-123", team: { id: "team-1" } } });
-      // 2: fetch existing labels on the issue
+      // 2-3: fetch existing labels + team labels (in parallel via Promise.all)
       mockLinearAPI({ issue: { labels: { nodes: [{ id: "label-existing" }] } } });
-      // 3: team label lookup
       mockLinearAPI({
         issueLabels: {
           nodes: [
@@ -607,7 +669,7 @@ describe("tracker-linear plugin", () => {
           ],
         },
       });
-      // 4: issueUpdate (labels)
+      // 4: consolidated issueUpdate (labels)
       mockLinearAPI({ issueUpdate: { success: true } });
 
       await tracker.updateIssue!("INT-123", { labels: ["bug", "urgent"] }, project);
@@ -615,11 +677,11 @@ describe("tracker-linear plugin", () => {
 
       const writeCall = requestMock.mock.results[3].value.write.mock.calls[0][0];
       const body = JSON.parse(writeCall);
-      // Should include existing + new labels
-      expect(body.variables.labelIds).toEqual(
+      // Should include existing + new labels via consolidated input
+      expect(body.variables.input.labelIds).toEqual(
         expect.arrayContaining(["label-existing", "label-1", "label-2"]),
       );
-      expect(body.variables.labelIds).toHaveLength(3);
+      expect(body.variables.input.labelIds).toHaveLength(3);
     });
   });
 
@@ -805,7 +867,7 @@ describe("tracker-linear plugin", () => {
   describe("createComment", () => {
     it("creates a comment and returns its ID", async () => {
       // 1: resolve identifier to UUID
-      mockLinearAPI({ issue: { id: "uuid-123" } });
+      mockLinearAPI({ issue: { id: "uuid-123", team: { id: "team-1" } } });
       // 2: create comment
       mockLinearAPI({
         commentCreate: {
@@ -826,7 +888,7 @@ describe("tracker-linear plugin", () => {
     });
 
     it("supports full markdown in comment body", async () => {
-      mockLinearAPI({ issue: { id: "uuid-123" } });
+      mockLinearAPI({ issue: { id: "uuid-123", team: { id: "team-1" } } });
       mockLinearAPI({
         commentCreate: {
           success: true,
@@ -858,7 +920,7 @@ describe("tracker-linear plugin", () => {
     });
 
     it("handles commentCreate failure gracefully (does not throw)", async () => {
-      mockLinearAPI({ issue: { id: "uuid-123" } });
+      mockLinearAPI({ issue: { id: "uuid-123", team: { id: "team-1" } } });
       mockLinearError("Rate limit exceeded");
 
       // Should NOT throw — returns empty ID instead
@@ -868,7 +930,7 @@ describe("tracker-linear plugin", () => {
     });
 
     it("handles success=false response gracefully", async () => {
-      mockLinearAPI({ issue: { id: "uuid-123" } });
+      mockLinearAPI({ issue: { id: "uuid-123", team: { id: "team-1" } } });
       mockLinearAPI({
         commentCreate: {
           success: false,
@@ -881,7 +943,7 @@ describe("tracker-linear plugin", () => {
     });
 
     it("sends correct GraphQL mutation", async () => {
-      mockLinearAPI({ issue: { id: "uuid-123" } });
+      mockLinearAPI({ issue: { id: "uuid-123", team: { id: "team-1" } } });
       mockLinearAPI({
         commentCreate: {
           success: true,
@@ -949,6 +1011,834 @@ describe("tracker-linear plugin", () => {
       await expect(tracker.getIssue("INT-123", project)).rejects.toThrow(
         "Linear API returned no data",
       );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue relations
+  // ---------------------------------------------------------------------------
+
+  describe("getIssueRelations", () => {
+    it("returns outward and inverse relations", async () => {
+      mockLinearAPI({
+        issue: {
+          identifier: "INT-123",
+          title: "Fix login bug",
+          relations: {
+            nodes: [
+              {
+                id: "rel-1",
+                type: "blocks",
+                relatedIssue: { identifier: "INT-200", title: "Deploy auth" },
+              },
+              {
+                id: "rel-2",
+                type: "related",
+                relatedIssue: { identifier: "INT-300", title: "Update docs" },
+              },
+            ],
+          },
+          inverseRelations: {
+            nodes: [
+              {
+                id: "rel-3",
+                type: "blocks",
+                issue: { identifier: "INT-50", title: "Setup DB" },
+              },
+            ],
+          },
+        },
+      });
+
+      const relations = await tracker.getIssueRelations!("INT-123", project);
+      expect(relations).toHaveLength(3);
+
+      // Outward: INT-123 blocks INT-200
+      expect(relations[0]).toEqual({
+        id: "rel-1",
+        type: "blocks",
+        from: "INT-123",
+        to: "INT-200",
+        fromTitle: "Fix login bug",
+        toTitle: "Deploy auth",
+      });
+
+      // Outward: INT-123 related INT-300
+      expect(relations[1]).toEqual({
+        id: "rel-2",
+        type: "related",
+        from: "INT-123",
+        to: "INT-300",
+        fromTitle: "Fix login bug",
+        toTitle: "Update docs",
+      });
+
+      // Inverse: INT-50 blocks INT-123
+      expect(relations[2]).toEqual({
+        id: "rel-3",
+        type: "blocks",
+        from: "INT-50",
+        to: "INT-123",
+        fromTitle: "Setup DB",
+        toTitle: "Fix login bug",
+      });
+    });
+
+    it("returns empty array when no relations exist", async () => {
+      mockLinearAPI({
+        issue: {
+          identifier: "INT-123",
+          title: "Fix login bug",
+          relations: { nodes: [] },
+          inverseRelations: { nodes: [] },
+        },
+      });
+
+      const relations = await tracker.getIssueRelations!("INT-123", project);
+      expect(relations).toEqual([]);
+    });
+
+    it("maps 'similar' type to 'related'", async () => {
+      mockLinearAPI({
+        issue: {
+          identifier: "INT-123",
+          title: "Fix login bug",
+          relations: {
+            nodes: [
+              {
+                id: "rel-1",
+                type: "similar",
+                relatedIssue: { identifier: "INT-456", title: "Similar issue" },
+              },
+            ],
+          },
+          inverseRelations: { nodes: [] },
+        },
+      });
+
+      const relations = await tracker.getIssueRelations!("INT-123", project);
+      expect(relations).toHaveLength(1);
+      expect(relations[0].type).toBe("related");
+    });
+
+    it("skips unknown relation types", async () => {
+      mockLinearAPI({
+        issue: {
+          identifier: "INT-123",
+          title: "Fix login bug",
+          relations: {
+            nodes: [
+              {
+                id: "rel-1",
+                type: "unknown_future_type",
+                relatedIssue: { identifier: "INT-456", title: "Other" },
+              },
+            ],
+          },
+          inverseRelations: { nodes: [] },
+        },
+      });
+
+      const relations = await tracker.getIssueRelations!("INT-123", project);
+      expect(relations).toEqual([]);
+    });
+
+    it("handles duplicate relation type", async () => {
+      mockLinearAPI({
+        issue: {
+          identifier: "INT-123",
+          title: "Fix login bug",
+          relations: {
+            nodes: [
+              {
+                id: "rel-1",
+                type: "duplicate",
+                relatedIssue: { identifier: "INT-456", title: "Same bug" },
+              },
+            ],
+          },
+          inverseRelations: { nodes: [] },
+        },
+      });
+
+      const relations = await tracker.getIssueRelations!("INT-123", project);
+      expect(relations).toHaveLength(1);
+      expect(relations[0].type).toBe("duplicate");
+    });
+  });
+
+  describe("createIssueRelation", () => {
+    it("creates a blocks relation", async () => {
+      mockLinearAPI({
+        issueRelationCreate: {
+          success: true,
+          issueRelation: {
+            id: "rel-new-1",
+            type: "blocks",
+            issue: { identifier: "INT-123", title: "Fix login" },
+            relatedIssue: { identifier: "INT-456", title: "Deploy" },
+          },
+        },
+      });
+
+      const rel = await tracker.createIssueRelation!("INT-123", "INT-456", "blocks", project);
+
+      expect(rel).toEqual({
+        id: "rel-new-1",
+        type: "blocks",
+        from: "INT-123",
+        to: "INT-456",
+        fromTitle: "Fix login",
+        toTitle: "Deploy",
+      });
+    });
+
+    it("creates a related relation", async () => {
+      mockLinearAPI({
+        issueRelationCreate: {
+          success: true,
+          issueRelation: {
+            id: "rel-new-2",
+            type: "related",
+            issue: { identifier: "INT-100", title: "Auth" },
+            relatedIssue: { identifier: "INT-200", title: "Docs" },
+          },
+        },
+      });
+
+      const rel = await tracker.createIssueRelation!("INT-100", "INT-200", "related", project);
+      expect(rel.type).toBe("related");
+      expect(rel.from).toBe("INT-100");
+      expect(rel.to).toBe("INT-200");
+    });
+
+    it("sends mutation with correct issueId and relatedIssueId", async () => {
+      mockLinearAPI({
+        issueRelationCreate: {
+          success: true,
+          issueRelation: {
+            id: "rel-1",
+            type: "duplicate",
+            issue: { identifier: "INT-10", title: "Original" },
+            relatedIssue: { identifier: "INT-20", title: "Dup" },
+          },
+        },
+      });
+
+      const rel = await tracker.createIssueRelation!("INT-10", "INT-20", "duplicate", project);
+
+      expect(rel.id).toBe("rel-1");
+      expect(rel.type).toBe("duplicate");
+      expect(rel.from).toBe("INT-10");
+      expect(rel.to).toBe("INT-20");
+      expect(requestMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("deleteIssueRelation", () => {
+    it("deletes a relation by ID", async () => {
+      mockLinearAPI({
+        issueRelationDelete: {
+          success: true,
+        },
+      });
+
+      await expect(
+        tracker.deleteIssueRelation!("rel-to-delete", project),
+      ).resolves.toBeUndefined();
+      expect(requestMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("propagates errors", async () => {
+      mockLinearError("Relation not found");
+
+      await expect(
+        tracker.deleteIssueRelation!("bad-id", project),
+      ).rejects.toThrow("Relation not found");
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // searchIssues
+  // ---------------------------------------------------------------------------
+
+  describe("searchIssues", () => {
+    it("returns matching issues from full-text search", async () => {
+      mockLinearAPI({
+        issueSearch: {
+          nodes: [sampleIssueNode],
+        },
+      });
+
+      const results = await tracker.searchIssues!("login bug", project);
+      expect(results).toHaveLength(1);
+      expect(results[0]).toEqual({
+        id: "INT-123",
+        title: "Fix login bug",
+        description: "Users can't log in with SSO",
+        url: "https://linear.app/acme/issue/INT-123",
+        state: "in_progress",
+        labels: ["bug", "high-priority"],
+        assignee: "Alice",
+        priority: 2,
+      });
+    });
+
+    it("returns empty array when no matches", async () => {
+      mockLinearAPI({
+        issueSearch: { nodes: [] },
+      });
+
+      const results = await tracker.searchIssues!("nonexistent query", project);
+      expect(results).toEqual([]);
+    });
+
+    it("respects limit option", async () => {
+      mockLinearAPI({
+        issueSearch: { nodes: [sampleIssueNode] },
+      });
+
+      const results = await tracker.searchIssues!("test", project, { limit: 5 });
+      expect(results).toHaveLength(1);
+      expect(requestMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("filters by team when teamId is in project config", async () => {
+      mockLinearAPI({
+        issueSearch: { nodes: [sampleIssueNode] },
+      });
+
+      await tracker.searchIssues!("auth", project);
+      expect(requestMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("excludes completed/canceled by default", async () => {
+      mockLinearAPI({
+        issueSearch: { nodes: [] },
+      });
+
+      await tracker.searchIssues!("closed stuff", project);
+      expect(requestMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("includes archived when option is set", async () => {
+      mockLinearAPI({
+        issueSearch: { nodes: [sampleIssueNode] },
+      });
+
+      await tracker.searchIssues!("old issue", project, { includeArchived: true });
+      expect(requestMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("handles multiple results", async () => {
+      const secondIssue = {
+        ...sampleIssueNode,
+        id: "uuid-456",
+        identifier: "INT-456",
+        title: "Another login issue",
+        url: "https://linear.app/acme/issue/INT-456",
+      };
+
+      mockLinearAPI({
+        issueSearch: {
+          nodes: [sampleIssueNode, secondIssue],
+        },
+      });
+
+      const results = await tracker.searchIssues!("login", project);
+      expect(results).toHaveLength(2);
+      expect(results[0].id).toBe("INT-123");
+      expect(results[1].id).toBe("INT-456");
+    });
+
+    it("propagates API errors", async () => {
+      mockLinearError("Search failed");
+
+      await expect(
+        tracker.searchIssues!("test", project),
+      ).rejects.toThrow("Search failed");
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Retry with exponential backoff
+  // ---------------------------------------------------------------------------
+
+  describe("retry with exponential backoff", () => {
+    beforeEach(() => {
+      // Enable retries with zero delay for fast tests
+      setRetryConfig({ maxRetries: 3, baseDelay: 0, maxDelay: 0, jitterFactor: 0 });
+    });
+
+    it("retries on HTTP 429 and succeeds on second attempt", async () => {
+      // First call: 429 rate limited
+      mockHTTPError(429, "rate limited");
+      // Second call: success
+      mockLinearAPI({ issue: sampleIssueNode });
+
+      const issue = await tracker.getIssue("INT-123", project);
+      expect(issue.id).toBe("INT-123");
+      expect(requestMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("retries on HTTP 500 server error", async () => {
+      // First call: 500
+      mockHTTPError(500, "Internal Server Error");
+      // Second call: success
+      mockLinearAPI({ issue: sampleIssueNode });
+
+      const issue = await tracker.getIssue("INT-123", project);
+      expect(issue.id).toBe("INT-123");
+      expect(requestMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("retries on HTTP 502 bad gateway", async () => {
+      mockHTTPError(502, "Bad Gateway");
+      mockLinearAPI({ issue: sampleIssueNode });
+
+      const issue = await tracker.getIssue("INT-123", project);
+      expect(issue.id).toBe("INT-123");
+    });
+
+    it("retries on HTTP 503 service unavailable", async () => {
+      mockHTTPError(503, "Service Unavailable");
+      mockLinearAPI({ issue: sampleIssueNode });
+
+      const issue = await tracker.getIssue("INT-123", project);
+      expect(issue.id).toBe("INT-123");
+    });
+
+    it("retries on network errors", async () => {
+      // First call: network error
+      requestMock.mockImplementationOnce(
+        (_opts: Record<string, unknown>, _callback: unknown) => {
+          const req = Object.assign(new EventEmitter(), {
+            write: vi.fn(),
+            end: vi.fn(),
+            destroy: vi.fn(),
+            setTimeout: vi.fn(),
+          });
+          process.nextTick(() => req.emit("error", new Error("ECONNRESET")));
+          return req;
+        },
+      );
+      // Second call: success
+      mockLinearAPI({ issue: sampleIssueNode });
+
+      const issue = await tracker.getIssue("INT-123", project);
+      expect(issue.id).toBe("INT-123");
+      expect(requestMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("does NOT retry on HTTP 401 (non-retryable)", async () => {
+      mockHTTPError(401, "Unauthorized");
+
+      await expect(tracker.getIssue("INT-123", project)).rejects.toThrow(
+        "Linear API returned HTTP 401",
+      );
+      expect(requestMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does NOT retry on HTTP 400 (non-retryable)", async () => {
+      mockHTTPError(400, "Bad Request");
+
+      await expect(tracker.getIssue("INT-123", project)).rejects.toThrow(
+        "Linear API returned HTTP 400",
+      );
+      expect(requestMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does NOT retry on GraphQL errors (non-retryable)", async () => {
+      mockLinearError("Entity not found");
+
+      await expect(tracker.getIssue("INT-123", project)).rejects.toThrow(
+        "Entity not found",
+      );
+      expect(requestMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("exhausts retries and throws the last error", async () => {
+      // 4 calls: 1 initial + 3 retries, all fail with 500
+      mockHTTPError(500, "fail 1");
+      mockHTTPError(500, "fail 2");
+      mockHTTPError(500, "fail 3");
+      mockHTTPError(500, "fail 4");
+
+      await expect(tracker.getIssue("INT-123", project)).rejects.toThrow(
+        "Linear API server error (HTTP 500)",
+      );
+      // 1 initial + 3 retries = 4 total attempts
+      expect(requestMock).toHaveBeenCalledTimes(4);
+    });
+
+    it("recovers after multiple retries", async () => {
+      // Fail twice, succeed on third attempt
+      mockHTTPError(500, "fail 1");
+      mockHTTPError(502, "fail 2");
+      mockLinearAPI({ issue: sampleIssueNode });
+
+      const issue = await tracker.getIssue("INT-123", project);
+      expect(issue.id).toBe("INT-123");
+      expect(requestMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("HTTP 429 produces a RetryableError with retryAfterMs from header", async () => {
+      // Mock a 429 with Retry-After header, then succeed
+      const body429 = JSON.stringify({ errors: [{ message: "rate limited" }] });
+      requestMock.mockImplementationOnce(
+        (
+          _opts: Record<string, unknown>,
+          callback: (res: EventEmitter & { statusCode: number; headers: Record<string, string> }) => void,
+        ) => {
+          const req = Object.assign(new EventEmitter(), {
+            write: vi.fn(),
+            end: vi.fn(() => {
+              const res = Object.assign(new EventEmitter(), {
+                statusCode: 429,
+                headers: { "retry-after": "5" },
+              });
+              callback(res);
+              process.nextTick(() => {
+                res.emit("data", Buffer.from(body429));
+                res.emit("end");
+              });
+            }),
+            destroy: vi.fn(),
+            setTimeout: vi.fn(),
+          });
+          return req;
+        },
+      );
+      // Second call succeeds
+      mockLinearAPI({ issue: sampleIssueNode });
+
+      const issue = await tracker.getIssue("INT-123", project);
+      expect(issue.id).toBe("INT-123");
+    });
+  });
+
+  // ---- Webhook Management ------------------------------------------------
+
+  describe("webhook management", () => {
+    const sampleWebhookNode = {
+      id: "wh-uuid-1",
+      url: "https://myserver.com/webhooks/linear",
+      enabled: true,
+      resourceTypes: ["Issue", "Comment", "IssueLabel"],
+      label: "ao-orchestrator",
+      createdAt: "2026-03-16T00:00:00.000Z",
+      team: { id: "team-uuid-1" },
+    };
+
+    describe("createWebhook", () => {
+      it("creates a webhook with default resource types", async () => {
+        mockLinearAPI({
+          webhookCreate: {
+            success: true,
+            webhook: sampleWebhookNode,
+          },
+        });
+
+        const result = await tracker.createWebhook!(
+          { url: "https://myserver.com/webhooks/linear" },
+          project,
+        );
+
+        expect(result).toEqual({
+          id: "wh-uuid-1",
+          url: "https://myserver.com/webhooks/linear",
+          enabled: true,
+          resourceTypes: ["Issue", "Comment", "IssueLabel"],
+          teamId: "team-uuid-1",
+          label: "ao-orchestrator",
+          createdAt: "2026-03-16T00:00:00.000Z",
+        });
+      });
+
+      it("passes custom resource types and label", async () => {
+        mockLinearAPI({
+          webhookCreate: {
+            success: true,
+            webhook: {
+              ...sampleWebhookNode,
+              resourceTypes: ["Issue", "Project"],
+              label: "custom-label",
+            },
+          },
+        });
+
+        const result = await tracker.createWebhook!(
+          {
+            url: "https://myserver.com/webhooks/linear",
+            resourceTypes: ["Issue", "Project"],
+            label: "custom-label",
+          },
+          project,
+        );
+
+        expect(result.resourceTypes).toEqual(["Issue", "Project"]);
+        expect(result.label).toBe("custom-label");
+      });
+
+      it("uses teamId from project config when not provided", async () => {
+        mockLinearAPI({
+          webhookCreate: {
+            success: true,
+            webhook: sampleWebhookNode,
+          },
+        });
+
+        await tracker.createWebhook!(
+          { url: "https://myserver.com/webhooks/linear" },
+          project,
+        );
+
+        // Verify the mutation was called (request was made)
+        expect(requestMock).toHaveBeenCalledTimes(1);
+        // Verify the request body includes teamId
+        const call = requestMock.mock.calls[0];
+        const req = call[1]; // callback
+        // The write fn receives the body
+        const returnedReq = requestMock.mock.results[0].value;
+        const writeCall = returnedReq.write.mock.calls[0][0] as string;
+        const parsed = JSON.parse(writeCall);
+        expect(parsed.variables.input.teamId).toBe("team-uuid-1");
+      });
+
+      it("allows explicit teamId override", async () => {
+        mockLinearAPI({
+          webhookCreate: {
+            success: true,
+            webhook: {
+              ...sampleWebhookNode,
+              team: { id: "other-team" },
+            },
+          },
+        });
+
+        const result = await tracker.createWebhook!(
+          {
+            url: "https://myserver.com/webhooks/linear",
+            teamId: "other-team",
+          },
+          project,
+        );
+
+        expect(result.teamId).toBe("other-team");
+      });
+
+      it("creates global webhook when no teamId", async () => {
+        mockLinearAPI({
+          webhookCreate: {
+            success: true,
+            webhook: {
+              ...sampleWebhookNode,
+              team: null,
+            },
+          },
+        });
+
+        const projectNoTeam: ProjectConfig = {
+          ...project,
+          tracker: { plugin: "linear" },
+        };
+
+        const result = await tracker.createWebhook!(
+          { url: "https://myserver.com/webhooks/linear" },
+          projectNoTeam,
+        );
+
+        expect(result.teamId).toBeUndefined();
+      });
+
+      it("includes secret when provided", async () => {
+        mockLinearAPI({
+          webhookCreate: {
+            success: true,
+            webhook: sampleWebhookNode,
+          },
+        });
+
+        await tracker.createWebhook!(
+          {
+            url: "https://myserver.com/webhooks/linear",
+            secret: "my-signing-secret",
+          },
+          project,
+        );
+
+        const returnedReq = requestMock.mock.results[0].value;
+        const writeCall = returnedReq.write.mock.calls[0][0] as string;
+        const parsed = JSON.parse(writeCall);
+        expect(parsed.variables.input.secret).toBe("my-signing-secret");
+      });
+
+      it("throws on GraphQL error", async () => {
+        mockLinearError("Insufficient permissions");
+
+        await expect(
+          tracker.createWebhook!(
+            { url: "https://myserver.com/webhooks/linear" },
+            project,
+          ),
+        ).rejects.toThrow("Insufficient permissions");
+      });
+    });
+
+    describe("deleteWebhook", () => {
+      it("deletes a webhook by ID", async () => {
+        mockLinearAPI({
+          webhookDelete: { success: true },
+        });
+
+        await expect(
+          tracker.deleteWebhook!("wh-uuid-1", project),
+        ).resolves.toBeUndefined();
+
+        expect(requestMock).toHaveBeenCalledTimes(1);
+      });
+
+      it("sends correct mutation variables", async () => {
+        mockLinearAPI({
+          webhookDelete: { success: true },
+        });
+
+        await tracker.deleteWebhook!("wh-uuid-99", project);
+
+        const returnedReq = requestMock.mock.results[0].value;
+        const writeCall = returnedReq.write.mock.calls[0][0] as string;
+        const parsed = JSON.parse(writeCall);
+        expect(parsed.variables.id).toBe("wh-uuid-99");
+      });
+
+      it("throws on GraphQL error", async () => {
+        mockLinearError("Webhook not found");
+
+        await expect(
+          tracker.deleteWebhook!("wh-nonexistent", project),
+        ).rejects.toThrow("Webhook not found");
+      });
+    });
+
+    describe("listWebhooks", () => {
+      it("returns all webhooks for the team", async () => {
+        mockLinearAPI({
+          webhooks: {
+            nodes: [
+              sampleWebhookNode,
+              {
+                ...sampleWebhookNode,
+                id: "wh-uuid-2",
+                url: "https://other.com/hook",
+                label: "other-service",
+              },
+            ],
+          },
+        });
+
+        const result = await tracker.listWebhooks!(project);
+
+        expect(result).toHaveLength(2);
+        expect(result[0].id).toBe("wh-uuid-1");
+        expect(result[1].id).toBe("wh-uuid-2");
+      });
+
+      it("filters webhooks by team when teamId in project config", async () => {
+        mockLinearAPI({
+          webhooks: {
+            nodes: [
+              sampleWebhookNode, // team-uuid-1 — matches
+              {
+                ...sampleWebhookNode,
+                id: "wh-uuid-other",
+                team: { id: "other-team-uuid" }, // different team
+              },
+              {
+                ...sampleWebhookNode,
+                id: "wh-uuid-global",
+                team: null, // global webhook — included
+              },
+            ],
+          },
+        });
+
+        const result = await tracker.listWebhooks!(project);
+
+        expect(result).toHaveLength(2);
+        expect(result.map((w) => w.id)).toEqual(["wh-uuid-1", "wh-uuid-global"]);
+      });
+
+      it("returns all webhooks when no teamId", async () => {
+        mockLinearAPI({
+          webhooks: {
+            nodes: [
+              sampleWebhookNode,
+              {
+                ...sampleWebhookNode,
+                id: "wh-uuid-other",
+                team: { id: "other-team-uuid" },
+              },
+            ],
+          },
+        });
+
+        const projectNoTeam: ProjectConfig = {
+          ...project,
+          tracker: { plugin: "linear" },
+        };
+
+        const result = await tracker.listWebhooks!(projectNoTeam);
+
+        expect(result).toHaveLength(2);
+      });
+
+      it("handles empty webhook list", async () => {
+        mockLinearAPI({
+          webhooks: { nodes: [] },
+        });
+
+        const result = await tracker.listWebhooks!(project);
+
+        expect(result).toHaveLength(0);
+      });
+
+      it("maps webhook fields correctly", async () => {
+        mockLinearAPI({
+          webhooks: {
+            nodes: [
+              {
+                id: "wh-mapped",
+                url: "https://test.com/hook",
+                enabled: false,
+                resourceTypes: ["Issue"],
+                label: "test-label",
+                createdAt: "2026-01-01T00:00:00.000Z",
+                team: null,
+              },
+            ],
+          },
+        });
+
+        const result = await tracker.listWebhooks!(project);
+
+        expect(result[0]).toEqual({
+          id: "wh-mapped",
+          url: "https://test.com/hook",
+          enabled: false,
+          resourceTypes: ["Issue"],
+          teamId: undefined,
+          label: "test-label",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+      });
+
+      it("throws on GraphQL error", async () => {
+        mockLinearError("Rate limited");
+
+        await expect(tracker.listWebhooks!(project)).rejects.toThrow(
+          "Rate limited",
+        );
+      });
     });
   });
 });

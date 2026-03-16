@@ -18,6 +18,12 @@ import type {
   IssueUpdate,
   CreateIssueInput,
   CreateCommentResult,
+  IssueRelation,
+  IssueRelationType,
+  IssueSearchOptions,
+  CreateWebhookInput,
+  WebhookInfo,
+  WebhookResourceType,
   ProjectConfig,
 } from "@composio/ao-core";
 import type { Composio } from "@composio/core";
@@ -31,6 +37,121 @@ import type { Composio } from "@composio/core";
  * Both the direct Linear API and Composio SDK transports implement this.
  */
 type GraphQLTransport = <T>(query: string, variables?: Record<string, unknown>) => Promise<T>;
+
+// ---------------------------------------------------------------------------
+// Retry with exponential backoff
+// ---------------------------------------------------------------------------
+
+/** Retry configuration */
+interface RetryConfig {
+  /** Maximum number of retry attempts (default: 3) */
+  maxRetries: number;
+  /** Base delay in ms before first retry (default: 1000) */
+  baseDelay: number;
+  /** Maximum delay in ms between retries (default: 15000) */
+  maxDelay: number;
+  /** Jitter factor 0-1 to randomize delays (default: 0.3) */
+  jitterFactor: number;
+}
+
+const DEFAULT_RETRY_CONFIG: RetryConfig = {
+  maxRetries: 3,
+  baseDelay: 1000,
+  maxDelay: 15_000,
+  jitterFactor: 0.3,
+};
+
+/**
+ * Active retry config — read at call time so tests can override it.
+ * Use setRetryConfig() to change.
+ */
+let _activeRetryConfig: RetryConfig = DEFAULT_RETRY_CONFIG;
+
+/**
+ * Override retry configuration. Useful for testing:
+ * - `setRetryConfig({ maxRetries: 0 })` to disable retries
+ * - `setRetryConfig({ maxRetries: 3, baseDelay: 0 })` to retry without delays
+ * Call with no args to restore defaults.
+ */
+export function setRetryConfig(config?: Partial<RetryConfig>): void {
+  _activeRetryConfig = config ? { ...DEFAULT_RETRY_CONFIG, ...config } : DEFAULT_RETRY_CONFIG;
+}
+
+/**
+ * Error subclass indicating the failure is transient and safe to retry.
+ * Transport layers throw this for: HTTP 429, 5xx, network errors, timeouts.
+ */
+export class RetryableError extends Error {
+  /** Suggested delay (ms) before retrying, e.g. from Retry-After header */
+  readonly retryAfterMs: number | undefined;
+
+  constructor(message: string, options?: { cause?: unknown; retryAfterMs?: number }) {
+    super(message, { cause: options?.cause });
+    this.name = "RetryableError";
+    this.retryAfterMs = options?.retryAfterMs;
+  }
+}
+
+/**
+ * Calculate delay for a retry attempt using exponential backoff with jitter.
+ * delay = min(baseDelay * 2^attempt, maxDelay) ± jitter
+ */
+function calculateRetryDelay(attempt: number, config: RetryConfig, retryAfterMs?: number): number {
+  // If the server told us when to retry, respect it (capped at maxDelay)
+  if (retryAfterMs !== undefined && retryAfterMs > 0) {
+    return Math.min(retryAfterMs, config.maxDelay);
+  }
+
+  const exponentialDelay = config.baseDelay * Math.pow(2, attempt);
+  const cappedDelay = Math.min(exponentialDelay, config.maxDelay);
+
+  // Add jitter: ±jitterFactor of the delay
+  const jitter = cappedDelay * config.jitterFactor * (2 * Math.random() - 1);
+  return Math.max(0, Math.round(cappedDelay + jitter));
+}
+
+/**
+ * Sleep for a given number of milliseconds.
+ * Uses a real timer — tests can use vi.useFakeTimers() to control this.
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Wrap a GraphQL transport with retry logic.
+ * Only retries on RetryableError — all other errors propagate immediately.
+ * Reads _activeRetryConfig at call time so tests can control behavior.
+ */
+function withRetry(transport: GraphQLTransport): GraphQLTransport {
+  return async <T>(query: string, variables?: Record<string, unknown>): Promise<T> => {
+    const config = _activeRetryConfig; // Read at call time for testability
+    let lastError: Error | undefined;
+
+    for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
+      try {
+        return await transport<T>(query, variables);
+      } catch (err: unknown) {
+        if (!(err instanceof RetryableError)) {
+          throw err; // Non-retryable — propagate immediately
+        }
+
+        lastError = err;
+
+        if (attempt < config.maxRetries) {
+          const delay = calculateRetryDelay(attempt, config, err.retryAfterMs);
+          console.warn(
+            `[tracker-linear] Retryable error (attempt ${attempt + 1}/${config.maxRetries}): ${err.message}. Retrying in ${delay}ms...`,
+          );
+          await sleep(delay);
+        }
+      }
+    }
+
+    // All retries exhausted — throw the last error
+    throw lastError!;
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Direct Linear API transport
@@ -52,6 +173,86 @@ interface LinearResponse<T> {
   data?: T;
   errors?: Array<{ message: string }>;
 }
+
+// ---------------------------------------------------------------------------
+// Rate limit tracking
+// ---------------------------------------------------------------------------
+
+interface RateLimitInfo {
+  /** Requests allowed per hour */
+  limit: number;
+  /** Requests remaining in current window */
+  remaining: number;
+  /** Unix timestamp (ms) when the window resets */
+  resetAt: number;
+}
+
+/**
+ * Last known rate limit state from Linear API headers.
+ * Exposed for external monitoring/testing.
+ */
+let _lastRateLimitInfo: RateLimitInfo | null = null;
+
+/** Get current rate limit info (for monitoring/diagnostics) */
+export function getRateLimitInfo(): RateLimitInfo | null {
+  return _lastRateLimitInfo;
+}
+
+/**
+ * Clear all in-memory caches. Exposed for testing.
+ * Clears: identifier→UUID cache, workflow state cache, rate limit info, retry config.
+ */
+export function clearCaches(): void {
+  identifierCache.clear();
+  workflowStateCache.clear();
+  _lastRateLimitInfo = null;
+  _activeRetryConfig = DEFAULT_RETRY_CONFIG;
+}
+
+/** Threshold (fraction) at which we start warning about rate limits */
+const RATE_LIMIT_WARN_THRESHOLD = 0.2; // warn when <20% remaining
+
+/**
+ * Parse Linear rate limit headers from an HTTP response.
+ * Linear returns: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset
+ */
+function parseRateLimitHeaders(headers: Record<string, string | string[] | undefined>): void {
+  const limit = headers["x-ratelimit-limit"];
+  const remaining = headers["x-ratelimit-remaining"];
+  const reset = headers["x-ratelimit-reset"];
+
+  if (limit && remaining) {
+    const limitNum = parseInt(String(limit), 10);
+    const remainingNum = parseInt(String(remaining), 10);
+    const resetNum = reset ? parseInt(String(reset), 10) * 1000 : Date.now() + 3600_000;
+
+    if (!isNaN(limitNum) && !isNaN(remainingNum)) {
+      _lastRateLimitInfo = { limit: limitNum, remaining: remainingNum, resetAt: resetNum };
+
+      const fraction = remainingNum / limitNum;
+      if (fraction <= 0) {
+        const resetDate = new Date(resetNum).toISOString().slice(11, 19);
+        console.error(
+          `[tracker-linear] ⚠️ RATE LIMIT EXHAUSTED: 0/${limitNum} requests remaining. Resets at ${resetDate} UTC`,
+        );
+      } else if (fraction <= RATE_LIMIT_WARN_THRESHOLD) {
+        console.warn(
+          `[tracker-linear] ⚠️ Rate limit warning: ${remainingNum}/${limitNum} requests remaining (${Math.round(fraction * 100)}%)`,
+        );
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Identifier → UUID cache
+// ---------------------------------------------------------------------------
+
+/**
+ * In-memory cache of issue identifier (e.g. "INT-1330") → UUID + teamId.
+ * Avoids repeated resolution queries — identifiers are stable.
+ */
+const identifierCache = new Map<string, { uuid: string; teamId: string }>();
 
 function createDirectTransport(): GraphQLTransport {
   return <T>(query: string, variables?: Record<string, unknown>): Promise<T> => {
@@ -86,8 +287,34 @@ function createDirectTransport(): GraphQLTransport {
           res.on("end", () => {
             settle(() => {
               try {
+                // Parse rate limit headers on every response (safe if headers missing)
+                if (res.headers) {
+                  parseRateLimitHeaders(
+                    res.headers as Record<string, string | string[] | undefined>,
+                  );
+                }
+
                 const text = Buffer.concat(chunks).toString("utf-8");
                 const status = res.statusCode ?? 0;
+                if (status === 429) {
+                  const retryAfter = res.headers?.["retry-after"];
+                  const retryAfterMs = retryAfter ? parseInt(String(retryAfter), 10) * 1000 : undefined;
+                  reject(
+                    new RetryableError(
+                      `Linear API rate limited (HTTP 429). Retry after ${retryAfter ?? "unknown"} seconds`,
+                      { retryAfterMs: retryAfterMs && !isNaN(retryAfterMs) ? retryAfterMs : undefined },
+                    ),
+                  );
+                  return;
+                }
+                if (status >= 500) {
+                  reject(
+                    new RetryableError(
+                      `Linear API server error (HTTP ${status}): ${text.slice(0, 200)}`,
+                    ),
+                  );
+                  return;
+                }
                 if (status < 200 || status >= 300) {
                   reject(new Error(`Linear API returned HTTP ${status}: ${text.slice(0, 200)}`));
                   return;
@@ -113,11 +340,15 @@ function createDirectTransport(): GraphQLTransport {
       req.setTimeout(30_000, () => {
         settle(() => {
           req.destroy();
-          reject(new Error("Linear API request timed out after 30s"));
+          reject(new RetryableError("Linear API request timed out after 30s"));
         });
       });
 
-      req.on("error", (err) => settle(() => reject(err)));
+      req.on("error", (err) =>
+        settle(() =>
+          reject(new RetryableError(`Linear API network error: ${err.message}`, { cause: err })),
+        ),
+      );
       req.write(body);
       req.end();
     });
@@ -177,7 +408,7 @@ function createComposioTransport(apiKey: string, entityId: string): GraphQLTrans
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
-        reject(new Error("Composio Linear API request timed out after 30s"));
+        reject(new RetryableError("Composio Linear API request timed out after 30s"));
       }, 30_000);
     });
 
@@ -189,7 +420,17 @@ function createComposioTransport(apiKey: string, entityId: string): GraphQLTrans
     timeoutPromise.catch(() => {});
 
     try {
-      const result = await Promise.race([resultPromise, timeoutPromise]);
+      let result: Awaited<typeof resultPromise>;
+      try {
+        result = await Promise.race([resultPromise, timeoutPromise]);
+      } catch (err: unknown) {
+        // Timeouts are already RetryableError; network/SDK failures should be too
+        if (err instanceof RetryableError) throw err;
+        throw new RetryableError(
+          `Composio transport error: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+      }
 
       if (!result.successful) {
         throw new Error(`Composio Linear API error: ${result.error ?? "unknown error"}`);
@@ -248,6 +489,24 @@ function mapLinearState(stateType: string): Issue["state"] {
     default:
       // triage, backlog, unstarted
       return "open";
+  }
+}
+
+/**
+ * Map Linear's relation type string to our IssueRelationType.
+ * Linear has "similar" which we map to "related". Returns null for unknown types.
+ */
+function mapRelationType(type: string): IssueRelationType | null {
+  switch (type) {
+    case "blocks":
+      return "blocks";
+    case "duplicate":
+      return "duplicate";
+    case "related":
+    case "similar":
+      return "related";
+    default:
+      return null;
   }
 }
 
@@ -311,6 +570,40 @@ async function getWorkflowStates(
 
   workflowStateCache.set(teamId, stateMap);
   return stateMap;
+}
+
+// ---------------------------------------------------------------------------
+// Identifier → UUID resolution (cached)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a Linear issue identifier (e.g. "INT-1330") to its UUID and teamId.
+ * Results are cached in-memory since identifiers are immutable.
+ */
+async function resolveIssueUuid(
+  gql: GraphQLTransport,
+  identifier: string,
+): Promise<{ uuid: string; teamId: string }> {
+  const cached = identifierCache.get(identifier);
+  if (cached) {
+    return cached;
+  }
+
+  const data = await gql<{
+    issue: { id: string; team: { id: string } };
+  }>(
+    `query($id: String!) {
+      issue(id: $id) {
+        id
+        team { id }
+      }
+    }`,
+    { id: identifier },
+  );
+
+  const result = { uuid: data.issue.id, teamId: data.issue.team.id };
+  identifierCache.set(identifier, result);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -387,13 +680,69 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
       return `feat/${identifier}`;
     },
 
-    async generatePrompt(identifier: string, project: ProjectConfig): Promise<string> {
-      const issue = await this.getIssue(identifier, project);
+    async generatePrompt(identifier: string, _project: ProjectConfig): Promise<string> {
+      // Use enriched query to get project, cycle, and dueDate context
+      const data = await query<{
+        issue: LinearIssueNode & {
+          dueDate: string | null;
+          estimate: number | null;
+          project?: { name: string; state: string };
+          cycle?: { name: string | null; number: number; startsAt: string; endsAt: string };
+          parent?: { identifier: string; title: string };
+        };
+      }>(
+        `query($id: String!) {
+          issue(id: $id) {
+            ${ISSUE_FIELDS}
+            dueDate
+            estimate
+            project { name state }
+            cycle { name number startsAt endsAt }
+            parent { identifier title }
+          }
+        }`,
+        { id: identifier },
+      );
+
+      const node = data.issue;
+      const issue: Issue = {
+        id: node.identifier,
+        title: node.title,
+        description: node.description ?? "",
+        url: node.url,
+        state: mapLinearState(node.state.type),
+        labels: node.labels.nodes.map((l) => l.name),
+        assignee: node.assignee?.displayName ?? node.assignee?.name,
+        priority: node.priority,
+      };
+
+      // Also populate the identifier cache while we have the data
+      identifierCache.set(identifier, { uuid: node.id, teamId: node.team.key });
+
       const lines = [
         `You are working on Linear ticket ${issue.id}: ${issue.title}`,
         `Issue URL: ${issue.url}`,
         "",
       ];
+
+      // Contextual metadata
+      if (node.parent) {
+        lines.push(`Parent issue: ${node.parent.identifier} — ${node.parent.title}`);
+      }
+
+      if (node.project) {
+        lines.push(`Project: ${node.project.name} (${node.project.state})`);
+      }
+
+      if (node.cycle) {
+        const cycleName = node.cycle.name ?? `Cycle ${node.cycle.number}`;
+        const endsAt = node.cycle.endsAt.slice(0, 10); // YYYY-MM-DD
+        lines.push(`Cycle: ${cycleName} (ends ${endsAt})`);
+      }
+
+      if (node.dueDate) {
+        lines.push(`Due date: ${node.dueDate}`);
+      }
 
       if (issue.labels.length > 0) {
         lines.push(`Labels: ${issue.labels.join(", ")}`);
@@ -410,8 +759,12 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
         lines.push(`Priority: ${priorityNames[issue.priority] ?? String(issue.priority)}`);
       }
 
+      if (node.estimate !== null && node.estimate !== undefined) {
+        lines.push(`Estimate: ${node.estimate} points`);
+      }
+
       if (issue.description) {
-        lines.push("## Description", "", issue.description);
+        lines.push("", "## Description", "", issue.description);
       }
 
       lines.push(
@@ -481,130 +834,109 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
       update: IssueUpdate,
       _project: ProjectConfig,
     ): Promise<void> {
-      // Linear's issue() query accepts both UUID and short identifier (e.g. "INT-1330").
-      // We resolve to UUID here for use in mutations.
-      const issueData = await query<{
-        issue: { id: string; team: { id: string } };
-      }>(
-        `query($id: String!) {
-          issue(id: $id) {
-            id
-            team { id }
-          }
-        }`,
-        { id: identifier },
-      );
+      // Resolve identifier → UUID + teamId (cached)
+      const { uuid: issueUuid, teamId } = await resolveIssueUuid(query, identifier);
 
-      const issueUuid = issueData.issue.id;
-      const teamId = issueData.issue.team.id;
+      // Build a single issueUpdate input object to consolidate mutations.
+      // We resolve stateId, assigneeId, and labelIds in parallel where possible,
+      // then send ONE issueUpdate mutation instead of up to 3 separate ones.
+      const issueInput: Record<string, unknown> = {};
 
-      // Handle state change
-      if (update.state) {
-        // Need to find the correct workflow state ID
-        const statesData = await query<{
-          workflowStates: { nodes: Array<{ id: string; name: string; type: string }> };
-        }>(
-          `query($teamId: ID!) {
-            workflowStates(filter: { team: { id: { eq: $teamId } } }) {
-              nodes { id name type }
-            }
-          }`,
-          { teamId },
-        );
-
-        const targetType =
-          update.state === "closed"
-            ? "completed"
-            : update.state === "open"
-              ? "unstarted"
-              : "started";
-
-        const targetState = statesData.workflowStates.nodes.find((s) => s.type === targetType);
-
-        if (!targetState) {
-          throw new Error(`No workflow state of type "${targetType}" found for team ${teamId}`);
-        }
-
-        await query(
-          `mutation($id: String!, $stateId: String!) {
-            issueUpdate(id: $id, input: { stateId: $stateId }) {
-              success
-            }
-          }`,
-          { id: issueUuid, stateId: targetState.id },
-        );
-      }
-
-      // Handle assignee
-      if (update.assignee) {
-        const usersData = await query<{
-          users: { nodes: Array<{ id: string; displayName: string; name: string }> };
-        }>(
-          `query($filter: UserFilter) {
-            users(filter: $filter) {
-              nodes { id displayName name }
-            }
-          }`,
-          { filter: { displayName: { eq: update.assignee } } },
-        );
-
-        const user = usersData.users.nodes[0];
-        if (user) {
-          await query(
-            `mutation($id: String!, $assigneeId: String!) {
-              issueUpdate(id: $id, input: { assigneeId: $assigneeId }) {
-                success
+      // Resolve all needed data in parallel
+      const [stateId, assigneeId, labelIds] = await Promise.all([
+        // Resolve state → stateId
+        update.state
+          ? (async () => {
+              const stateMap = await getWorkflowStates(query, teamId);
+              const targetType =
+                update.state === "closed"
+                  ? "completed"
+                  : update.state === "open"
+                    ? "unstarted"
+                    : "started";
+              const id = stateMap.get(`__type__${targetType}`);
+              if (!id) {
+                throw new Error(
+                  `No workflow state of type "${targetType}" found for team ${teamId}`,
+                );
               }
-            }`,
-            { id: issueUuid, assigneeId: user.id },
-          );
-        }
-      }
+              return id;
+            })()
+          : Promise.resolve(null),
 
-      // Handle labels (additive — merge with existing labels to match tracker-github behavior)
-      if (update.labels && update.labels.length > 0) {
-        // Fetch existing label IDs on the issue
-        const existingData = await query<{
-          issue: { labels: { nodes: Array<{ id: string }> } };
-        }>(
-          `query($id: String!) {
-            issue(id: $id) {
-              labels { nodes { id } }
-            }
-          }`,
-          { id: issueUuid },
-        );
-        const existingIds = new Set(existingData.issue.labels.nodes.map((l) => l.id));
+        // Resolve assignee → assigneeId
+        update.assignee
+          ? (async () => {
+              const usersData = await query<{
+                users: { nodes: Array<{ id: string; displayName: string; name: string }> };
+              }>(
+                `query($filter: UserFilter) {
+                  users(filter: $filter) {
+                    nodes { id displayName name }
+                  }
+                }`,
+                { filter: { displayName: { eq: update.assignee } } },
+              );
+              return usersData.users.nodes[0]?.id ?? null;
+            })()
+          : Promise.resolve(null),
 
-        // Resolve new label names to IDs
-        const labelsData = await query<{
-          issueLabels: { nodes: Array<{ id: string; name: string }> };
-        }>(
-          `query($teamId: ID) {
-            issueLabels(filter: { team: { id: { eq: $teamId } } }) {
-              nodes { id name }
-            }
-          }`,
-          { teamId },
-        );
+        // Resolve labels → labelIds (merge with existing)
+        update.labels && update.labels.length > 0
+          ? (async () => {
+              // Fetch existing labels and team labels in parallel
+              const [existingData, labelsData] = await Promise.all([
+                query<{
+                  issue: { labels: { nodes: Array<{ id: string }> } };
+                }>(
+                  `query($id: String!) {
+                    issue(id: $id) {
+                      labels { nodes { id } }
+                    }
+                  }`,
+                  { id: issueUuid },
+                ),
+                query<{
+                  issueLabels: { nodes: Array<{ id: string; name: string }> };
+                }>(
+                  `query($teamId: ID) {
+                    issueLabels(filter: { team: { id: { eq: $teamId } } }) {
+                      nodes { id name }
+                    }
+                  }`,
+                  { teamId },
+                ),
+              ]);
 
-        const labelMap = new Map(labelsData.issueLabels.nodes.map((l) => [l.name, l.id]));
-        for (const name of update.labels) {
-          const id = labelMap.get(name);
-          if (id) existingIds.add(id);
-        }
+              const existingIds = new Set(existingData.issue.labels.nodes.map((l) => l.id));
+              const labelMap = new Map(labelsData.issueLabels.nodes.map((l) => [l.name, l.id]));
+              for (const name of update.labels ?? []) {
+                const id = labelMap.get(name);
+                if (id) existingIds.add(id);
+              }
+              return [...existingIds];
+            })()
+          : Promise.resolve(null),
+      ]);
 
+      // Build consolidated input
+      if (stateId) issueInput["stateId"] = stateId;
+      if (assigneeId) issueInput["assigneeId"] = assigneeId;
+      if (labelIds) issueInput["labelIds"] = labelIds;
+
+      // Send ONE issueUpdate mutation if there's anything to update
+      if (Object.keys(issueInput).length > 0) {
         await query(
-          `mutation($id: String!, $labelIds: [String!]!) {
-            issueUpdate(id: $id, input: { labelIds: $labelIds }) {
+          `mutation($id: String!, $input: IssueUpdateInput!) {
+            issueUpdate(id: $id, input: $input) {
               success
             }
           }`,
-          { id: issueUuid, labelIds: [...existingIds] },
+          { id: issueUuid, input: issueInput },
         );
       }
 
-      // Handle comment
+      // Handle comment separately (commentCreate is a different mutation)
       if (update.comment) {
         await query(
           `mutation($issueId: String!, $body: String!) {
@@ -622,20 +954,11 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
       body: string,
       _project: ProjectConfig,
     ): Promise<CreateCommentResult> {
-      // Resolve identifier to UUID (Linear accepts both, but mutations need UUID)
+      // Resolve identifier to UUID (cached)
       let issueUuid: string;
       try {
-        const issueData = await query<{
-          issue: { id: string };
-        }>(
-          `query($id: String!) {
-            issue(id: $id) {
-              id
-            }
-          }`,
-          { id: identifier },
-        );
-        issueUuid = issueData.issue.id;
+        const { uuid } = await resolveIssueUuid(query, identifier);
+        issueUuid = uuid;
       } catch (err) {
         // Log error but don't crash — orchestrator must continue
         const msg = err instanceof Error ? err.message : String(err);
@@ -826,21 +1149,8 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
       statusName: string,
       _project: ProjectConfig,
     ): Promise<void> {
-      // Resolve identifier to UUID and get team ID
-      const issueData = await query<{
-        issue: { id: string; team: { id: string } };
-      }>(
-        `query($id: String!) {
-          issue(id: $id) {
-            id
-            team { id }
-          }
-        }`,
-        { id: identifier },
-      );
-
-      const issueUuid = issueData.issue.id;
-      const teamId = issueData.issue.team.id;
+      // Resolve identifier to UUID and get team ID (cached)
+      const { uuid: issueUuid, teamId } = await resolveIssueUuid(query, identifier);
 
       // Get workflow states from cache (or fetch and cache)
       const stateMap = await getWorkflowStates(query, teamId);
@@ -968,6 +1278,333 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
         teamKey: node.team.key,
       };
     },
+
+    async getIssueRelations(
+      identifier: string,
+      _project: ProjectConfig,
+    ): Promise<IssueRelation[]> {
+      const data = await query<{
+        issue: {
+          identifier: string;
+          title: string;
+          relations: {
+            nodes: Array<{
+              id: string;
+              type: string;
+              relatedIssue: { identifier: string; title: string };
+            }>;
+          };
+          inverseRelations: {
+            nodes: Array<{
+              id: string;
+              type: string;
+              issue: { identifier: string; title: string };
+            }>;
+          };
+        };
+      }>(
+        `query($id: String!) {
+          issue(id: $id) {
+            identifier
+            title
+            relations {
+              nodes {
+                id
+                type
+                relatedIssue { identifier title }
+              }
+            }
+            inverseRelations {
+              nodes {
+                id
+                type
+                issue { identifier title }
+              }
+            }
+          }
+        }`,
+        { id: identifier },
+      );
+
+      const node = data.issue;
+      const results: IssueRelation[] = [];
+
+      // Outward relations: this issue → relatedIssue
+      for (const rel of node.relations.nodes) {
+        const type = mapRelationType(rel.type);
+        if (type) {
+          results.push({
+            id: rel.id,
+            type,
+            from: node.identifier,
+            to: rel.relatedIssue.identifier,
+            fromTitle: node.title,
+            toTitle: rel.relatedIssue.title,
+          });
+        }
+      }
+
+      // Inverse relations: issue → this issue (flip direction)
+      for (const rel of node.inverseRelations.nodes) {
+        const type = mapRelationType(rel.type);
+        if (type) {
+          // For "blocks" inverse: the other issue blocks this one
+          results.push({
+            id: rel.id,
+            type,
+            from: rel.issue.identifier,
+            to: node.identifier,
+            fromTitle: rel.issue.title,
+            toTitle: node.title,
+          });
+        }
+      }
+
+      return results;
+    },
+
+    async createIssueRelation(
+      from: string,
+      to: string,
+      type: IssueRelationType,
+      _project: ProjectConfig,
+    ): Promise<IssueRelation> {
+      const data = await query<{
+        issueRelationCreate: {
+          success: boolean;
+          issueRelation: {
+            id: string;
+            type: string;
+            issue: { identifier: string; title: string };
+            relatedIssue: { identifier: string; title: string };
+          };
+        };
+      }>(
+        `mutation($issueId: String!, $relatedIssueId: String!, $type: IssueRelationType!) {
+          issueRelationCreate(input: {
+            issueId: $issueId,
+            relatedIssueId: $relatedIssueId,
+            type: $type
+          }) {
+            success
+            issueRelation {
+              id
+              type
+              issue { identifier title }
+              relatedIssue { identifier title }
+            }
+          }
+        }`,
+        { issueId: from, relatedIssueId: to, type },
+      );
+
+      const rel = data.issueRelationCreate.issueRelation;
+      return {
+        id: rel.id,
+        type: mapRelationType(rel.type) ?? "related",
+        from: rel.issue.identifier,
+        to: rel.relatedIssue.identifier,
+        fromTitle: rel.issue.title,
+        toTitle: rel.relatedIssue.title,
+      };
+    },
+
+    async deleteIssueRelation(
+      relationId: string,
+      _project: ProjectConfig,
+    ): Promise<void> {
+      await query(
+        `mutation($id: String!) {
+          issueRelationDelete(id: $id) {
+            success
+          }
+        }`,
+        { id: relationId },
+      );
+    },
+
+    async searchIssues(
+      searchQuery: string,
+      project: ProjectConfig,
+      options?: IssueSearchOptions,
+    ): Promise<Issue[]> {
+      const limit = options?.limit ?? 20;
+      const includeArchived = options?.includeArchived ?? false;
+
+      // Build optional team filter
+      const teamId = project.tracker?.["teamId"];
+      const filter: Record<string, unknown> = {};
+      if (teamId) {
+        filter["team"] = { id: { eq: teamId } };
+      }
+      if (!includeArchived) {
+        filter["state"] = { type: { nin: ["completed", "canceled"] } };
+      }
+
+      const data = await query<{
+        issueSearch: {
+          nodes: LinearIssueNode[];
+        };
+      }>(
+        `query($query: String!, $first: Int, $filter: IssueFilter, $includeArchived: Boolean) {
+          issueSearch(query: $query, first: $first, filter: $filter, includeArchived: $includeArchived) {
+            nodes {
+              ${ISSUE_FIELDS}
+            }
+          }
+        }`,
+        {
+          query: searchQuery,
+          first: limit,
+          filter: Object.keys(filter).length > 0 ? filter : undefined,
+          includeArchived,
+        },
+      );
+
+      return data.issueSearch.nodes.map((node) => ({
+        id: node.identifier,
+        title: node.title,
+        description: node.description ?? "",
+        url: node.url,
+        state: mapLinearState(node.state.type),
+        labels: node.labels.nodes.map((l) => l.name),
+        assignee: node.assignee?.displayName ?? node.assignee?.name,
+        priority: node.priority,
+      }));
+    },
+
+    // --- Webhook Management ---
+
+    async createWebhook(
+      input: CreateWebhookInput,
+      project: ProjectConfig,
+    ): Promise<WebhookInfo> {
+      const resourceTypes = input.resourceTypes ?? ["Issue", "Comment", "IssueLabel"];
+      const label = input.label ?? "ao-orchestrator";
+      const enabled = input.enabled ?? true;
+
+      // Build mutation input — only include teamId if scoped
+      const teamId = input.teamId ?? project.tracker?.["teamId"];
+      const mutationInput: Record<string, unknown> = {
+        url: input.url,
+        resourceTypes,
+        label,
+        enabled,
+      };
+      if (teamId) {
+        mutationInput["teamId"] = teamId;
+      }
+      if (input.secret) {
+        mutationInput["secret"] = input.secret;
+      }
+
+      const data = await query<{
+        webhookCreate: {
+          success: boolean;
+          webhook: {
+            id: string;
+            url: string;
+            enabled: boolean;
+            resourceTypes: WebhookResourceType[];
+            label: string;
+            createdAt: string;
+            team: { id: string } | null;
+          };
+        };
+      }>(
+        `mutation($input: WebhookCreateInput!) {
+          webhookCreate(input: $input) {
+            success
+            webhook {
+              id
+              url
+              enabled
+              resourceTypes
+              label
+              createdAt
+              team { id }
+            }
+          }
+        }`,
+        { input: mutationInput },
+      );
+
+      const wh = data.webhookCreate.webhook;
+      return {
+        id: wh.id,
+        url: wh.url,
+        enabled: wh.enabled,
+        resourceTypes: wh.resourceTypes,
+        teamId: wh.team?.id,
+        label: wh.label,
+        createdAt: wh.createdAt,
+      };
+    },
+
+    async deleteWebhook(
+      webhookId: string,
+      _project: ProjectConfig,
+    ): Promise<void> {
+      await query(
+        `mutation($id: String!) {
+          webhookDelete(id: $id) {
+            success
+          }
+        }`,
+        { id: webhookId },
+      );
+    },
+
+    async listWebhooks(project: ProjectConfig): Promise<WebhookInfo[]> {
+      const teamId = project.tracker?.["teamId"];
+
+      const data = await query<{
+        webhooks: {
+          nodes: Array<{
+            id: string;
+            url: string;
+            enabled: boolean;
+            resourceTypes: WebhookResourceType[];
+            label: string;
+            createdAt: string;
+            team: { id: string } | null;
+          }>;
+        };
+      }>(
+        `query {
+          webhooks {
+            nodes {
+              id
+              url
+              enabled
+              resourceTypes
+              label
+              createdAt
+              team { id }
+            }
+          }
+        }`,
+      );
+
+      let webhooks = data.webhooks.nodes;
+
+      // If project has a teamId, filter to only that team's webhooks + global ones
+      if (teamId) {
+        webhooks = webhooks.filter(
+          (wh) => !wh.team || wh.team.id === teamId,
+        );
+      }
+
+      return webhooks.map((wh) => ({
+        id: wh.id,
+        url: wh.url,
+        enabled: wh.enabled,
+        resourceTypes: wh.resourceTypes,
+        teamId: wh.team?.id,
+        label: wh.label,
+        createdAt: wh.createdAt,
+      }));
+    },
   };
 }
 
@@ -983,12 +1620,20 @@ export const manifest = {
 };
 
 export function create(): Tracker {
+  // Prioritize direct Linear API transport — only fall back to Composio
+  // if LINEAR_API_KEY is not set and COMPOSIO_API_KEY is available.
+  // All transports are wrapped with retry + exponential backoff.
+  const linearKey = process.env["LINEAR_API_KEY"];
+  if (linearKey) {
+    return createLinearTracker(withRetry(createDirectTransport()));
+  }
   const composioKey = process.env["COMPOSIO_API_KEY"];
   if (composioKey) {
     const entityId = process.env["COMPOSIO_ENTITY_ID"] ?? "default";
-    return createLinearTracker(createComposioTransport(composioKey, entityId));
+    return createLinearTracker(withRetry(createComposioTransport(composioKey, entityId)));
   }
-  return createLinearTracker(createDirectTransport());
+  // No key found — createDirectTransport will throw a clear error
+  return createLinearTracker(withRetry(createDirectTransport()));
 }
 
 export default { manifest, create } satisfies PluginModule<Tracker>;

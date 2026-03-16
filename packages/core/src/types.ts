@@ -29,6 +29,7 @@ export type SessionStatus =
   | "pr_open"
   | "ci_failed"
   | "review_pending"
+  | "in_review"
   | "changes_requested"
   | "approved"
   | "mergeable"
@@ -500,6 +501,146 @@ export interface Tracker {
     statusName: string,
     project: ProjectConfig,
   ): Promise<void>;
+
+  /**
+   * Optional: get all relations for an issue (blocks, blocked-by, related, duplicate).
+   * Critical for orchestrators to detect dependency conflicts between parallel agents.
+   *
+   * @param identifier - Issue identifier (e.g., "PP-45")
+   * @param project - Project configuration
+   * @returns All relations grouped by direction (outward relations + inverse relations)
+   */
+  getIssueRelations?(
+    identifier: string,
+    project: ProjectConfig,
+  ): Promise<IssueRelation[]>;
+
+  /**
+   * Optional: create a relation between two issues.
+   *
+   * @param from - Source issue identifier (e.g., "PP-45")
+   * @param to - Target issue identifier (e.g., "PP-46")
+   * @param type - Relation type: "blocks" means `from` blocks `to`
+   * @param project - Project configuration
+   * @returns The created relation
+   */
+  createIssueRelation?(
+    from: string,
+    to: string,
+    type: IssueRelationType,
+    project: ProjectConfig,
+  ): Promise<IssueRelation>;
+
+  /**
+   * Optional: delete a relation between issues.
+   *
+   * @param relationId - The relation's unique ID
+   * @param project - Project configuration
+   */
+  deleteIssueRelation?(
+    relationId: string,
+    project: ProjectConfig,
+  ): Promise<void>;
+
+  /**
+   * Optional: full-text search across issues.
+   * Used by orchestrators to detect duplicates, find context, and discover related work.
+   *
+   * @param query - Search query string (matches title, description, comments)
+   * @param project - Project configuration
+   * @param options - Optional: limit results, include archived
+   * @returns Matching issues ordered by relevance
+   */
+  searchIssues?(
+    query: string,
+    project: ProjectConfig,
+    options?: IssueSearchOptions,
+  ): Promise<Issue[]>;
+
+  // --- Webhook Management ---
+
+  /**
+   * Optional: create a webhook subscription via the tracker API.
+   * Eliminates manual webhook setup — auto-registers on `ao init` or server start.
+   *
+   * @param input - Webhook configuration (URL, resources, team scope)
+   * @param project - Project configuration
+   * @returns The created webhook info
+   */
+  createWebhook?(
+    input: CreateWebhookInput,
+    project: ProjectConfig,
+  ): Promise<WebhookInfo>;
+
+  /**
+   * Optional: delete a webhook subscription.
+   *
+   * @param webhookId - The webhook's unique ID
+   * @param project - Project configuration
+   */
+  deleteWebhook?(
+    webhookId: string,
+    project: ProjectConfig,
+  ): Promise<void>;
+
+  /**
+   * Optional: list all webhooks for the team/workspace.
+   * Used to detect existing registrations and avoid duplicates.
+   *
+   * @param project - Project configuration
+   * @returns All registered webhooks
+   */
+  listWebhooks?(project: ProjectConfig): Promise<WebhookInfo[]>;
+}
+
+/** Resource types that can trigger webhook events */
+export type WebhookResourceType =
+  | "Issue"
+  | "Comment"
+  | "IssueLabel"
+  | "Project"
+  | "Cycle"
+  | "Reaction";
+
+/** Information about a registered webhook */
+export interface WebhookInfo {
+  /** Unique webhook ID (for updates/deletion) */
+  id: string;
+  /** The URL Linear will POST events to */
+  url: string;
+  /** Whether the webhook is currently active */
+  enabled: boolean;
+  /** Resource types this webhook is subscribed to */
+  resourceTypes: WebhookResourceType[];
+  /** Team ID if scoped to a specific team (null = all teams) */
+  teamId?: string;
+  /** Label for identification (e.g., "ao-orchestrator") */
+  label?: string;
+  /** When the webhook was created */
+  createdAt?: string;
+}
+
+/** Input for creating a new webhook subscription */
+export interface CreateWebhookInput {
+  /** The URL to receive webhook events */
+  url: string;
+  /** Resource types to subscribe to (default: ["Issue", "Comment", "IssueLabel"]) */
+  resourceTypes?: WebhookResourceType[];
+  /** Team ID to scope the webhook (omit for all teams) */
+  teamId?: string;
+  /** Human-readable label (default: "ao-orchestrator") */
+  label?: string;
+  /** Signing secret for HMAC verification */
+  secret?: string;
+  /** Whether the webhook is active (default: true) */
+  enabled?: boolean;
+}
+
+export interface IssueSearchOptions {
+  /** Maximum results to return (default: 20) */
+  limit?: number;
+  /** Include archived/completed issues (default: false) */
+  includeArchived?: boolean;
 }
 
 export interface Issue {
@@ -576,6 +717,28 @@ export interface IssueWithContext extends Issue {
   projectName?: string;
   /** Team key (e.g., "PP" for ProximityParks) */
   teamKey?: string;
+}
+
+/** Relation types between issues */
+export type IssueRelationType = "blocks" | "duplicate" | "related";
+
+/**
+ * A directional relation between two issues.
+ * For "blocks": the issue in `from` blocks the issue in `to`.
+ */
+export interface IssueRelation {
+  /** Unique relation ID (for deletion) */
+  id: string;
+  /** Relation type */
+  type: IssueRelationType;
+  /** Source issue identifier */
+  from: string;
+  /** Target issue identifier */
+  to: string;
+  /** Source issue title (for display) */
+  fromTitle?: string;
+  /** Target issue title (for display) */
+  toTitle?: string;
 }
 
 // =============================================================================

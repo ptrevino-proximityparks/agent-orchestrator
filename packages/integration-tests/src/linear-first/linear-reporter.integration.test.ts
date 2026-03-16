@@ -87,10 +87,13 @@ function makeEvent(
   data: Record<string, unknown> = {},
 ): OrchestratorEvent {
   return {
+    id: `evt-${Date.now()}`,
     type,
+    priority: "info" as const,
     timestamp: new Date(),
     sessionId: "test-1",
     projectId: "test-app",
+    message: `Event: ${type}`,
     data,
   };
 }
@@ -361,7 +364,7 @@ describe("LinearReporter", () => {
 
   describe("error handling", () => {
     it("continues gracefully when createComment fails", async () => {
-      vi.mocked(mockTracker.createComment).mockRejectedValueOnce(new Error("API error"));
+      vi.mocked(mockTracker.createComment!).mockRejectedValueOnce(new Error("API error"));
 
       const reporter = createLinearReporter({
         config,
@@ -378,7 +381,7 @@ describe("LinearReporter", () => {
     });
 
     it("continues gracefully when updateIssueStatus fails", async () => {
-      vi.mocked(mockTracker.updateIssueStatus).mockRejectedValueOnce(new Error("API error"));
+      vi.mocked(mockTracker.updateIssueStatus!).mockRejectedValueOnce(new Error("API error"));
 
       const reporter = createLinearReporter({
         config,
