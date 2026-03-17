@@ -83,21 +83,14 @@ interface LinearCommentData {
  * Verify Linear webhook signature using HMAC-SHA256.
  * Linear sends the signature in linear-signature header.
  */
-function verifySignature(
-  rawBody: string,
-  signature: string,
-  secret: string,
-): boolean {
+function verifySignature(rawBody: string, signature: string, secret: string): boolean {
   try {
     const hmac = crypto.createHmac("sha256", secret);
     hmac.update(rawBody);
     const expectedSignature = hmac.digest("hex");
 
     // Use timing-safe comparison to prevent timing attacks
-    return crypto.timingSafeEqual(
-      Buffer.from(signature),
-      Buffer.from(expectedSignature),
-    );
+    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature));
   } catch {
     return false;
   }
@@ -120,9 +113,7 @@ function toIssueContext(data: LinearIssueData): LinearIssueContext {
     statusType: data.state?.type,
     teamKey: data.team?.key,
     teamName: data.team?.name,
-    assignee: data.assignee
-      ? { id: data.assignee.id, name: data.assignee.name }
-      : undefined,
+    assignee: data.assignee ? { id: data.assignee.id, name: data.assignee.name } : undefined,
     labels: data.labels?.map((l) => l.name),
   };
 }
@@ -135,9 +126,10 @@ function toIssueContext(data: LinearIssueData): LinearIssueContext {
  * Handle Comment.create event.
  * Currently ignored to prevent loops.
  */
-function handleCommentCreate(
-  comment: LinearCommentData,
-): { action: string; details?: Record<string, unknown> } {
+function handleCommentCreate(comment: LinearCommentData): {
+  action: string;
+  details?: Record<string, unknown>;
+} {
   // Skip bot comments to prevent loops
   if (isBotGeneratedComment(comment.body ?? "")) {
     return { action: "ignored", details: { reason: "bot comment detected" } };
@@ -153,6 +145,26 @@ function handleCommentCreate(
 }
 
 // ---------------------------------------------------------------------------
+// Health-check endpoint
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/webhooks/linear
+ *
+ * Health-check endpoint to verify webhook configuration.
+ * Returns configuration status without exposing secrets.
+ */
+export async function GET() {
+  const webhookSecret = process.env["LINEAR_WEBHOOK_SECRET"];
+  const configured = Boolean(webhookSecret);
+
+  return NextResponse.json({
+    configured,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main webhook handler
 // ---------------------------------------------------------------------------
 
@@ -161,21 +173,15 @@ export async function POST(request: NextRequest) {
   const webhookSecret = process.env["LINEAR_WEBHOOK_SECRET"];
   if (!webhookSecret) {
     console.error("[webhooks/linear] LINEAR_WEBHOOK_SECRET not configured");
-    return NextResponse.json(
-      { error: "Webhook not configured" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "Webhook not configured" }, { status: 500 });
   }
 
   // Get the signature header
-  const signature = request.headers.get("linear-signature")
-    ?? request.headers.get("x-linear-signature");
+  const signature =
+    request.headers.get("linear-signature") ?? request.headers.get("x-linear-signature");
 
   if (!signature) {
-    return NextResponse.json(
-      { error: "Missing webhook signature" },
-      { status: 401 },
-    );
+    return NextResponse.json({ error: "Missing webhook signature" }, { status: 401 });
   }
 
   // Read raw body for signature verification
@@ -184,10 +190,7 @@ export async function POST(request: NextRequest) {
   // Verify signature
   if (!verifySignature(rawBody, signature, webhookSecret)) {
     console.warn("[webhooks/linear] Invalid webhook signature");
-    return NextResponse.json(
-      { error: "Invalid webhook signature" },
-      { status: 401 },
-    );
+    return NextResponse.json({ error: "Invalid webhook signature" }, { status: 401 });
   }
 
   // Parse JSON body
@@ -195,18 +198,13 @@ export async function POST(request: NextRequest) {
   try {
     payload = JSON.parse(rawBody) as LinearWebhookPayload;
   } catch {
-    return NextResponse.json(
-      { error: "Invalid JSON payload" },
-      { status: 400 },
-    );
+    return NextResponse.json({ error: "Invalid JSON payload" }, { status: 400 });
   }
 
   // Log the incoming webhook (for debugging)
   console.log(
     `[webhooks/linear] Received: ${payload.type}.${payload.action}`,
-    payload.type === "Issue"
-      ? `(${(payload.data as LinearIssueData).identifier})`
-      : "",
+    payload.type === "Issue" ? `(${(payload.data as LinearIssueData).identifier})` : "",
   );
 
   // Get services
@@ -223,10 +221,7 @@ export async function POST(request: NextRequest) {
       case "Issue.update": {
         const issueData = payload.data as LinearIssueData;
         const issueContext = toIssueContext(issueData);
-        const spawnResult = await autoSpawn.handleIssueStatusChange(
-          issueContext,
-          sessionManager,
-        );
+        const spawnResult = await autoSpawn.handleIssueStatusChange(issueContext, sessionManager);
         result = {
           action: spawnResult.action,
           reason: spawnResult.reason,
