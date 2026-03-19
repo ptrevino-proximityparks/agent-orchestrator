@@ -18,6 +18,7 @@ export {
   findConfigFile,
   getProviderEnvVars,
   checkOllamaHealth,
+  checkAnthropicApiKey,
 } from "./config.js";
 
 // Plugin registry

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { getProviderEnvVars, checkOllamaHealth } from "../config.js";
+import { getProviderEnvVars, checkOllamaHealth, checkAnthropicApiKey } from "../config.js";
 import type { ProviderConfig } from "../types.js";
 
 describe("getProviderEnvVars", () => {
@@ -217,5 +217,55 @@ describe("checkOllamaHealth", () => {
     await expect(checkOllamaHealth("http://custom:9999")).rejects.toThrow(
       "Ollama not available at http://custom:9999: Connection refused",
     );
+  });
+});
+
+describe("checkAnthropicApiKey", () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    // Create a fresh copy of process.env for each test
+    process.env = { ...originalEnv };
+  });
+
+  afterEach(() => {
+    // Restore original process.env
+    process.env = originalEnv;
+  });
+
+  it("succeeds when ANTHROPIC_API_KEY is set", () => {
+    process.env["ANTHROPIC_API_KEY"] = "sk-ant-test-key";
+    expect(() => checkAnthropicApiKey()).not.toThrow();
+  });
+
+  it("throws error when ANTHROPIC_API_KEY is not set", () => {
+    delete process.env["ANTHROPIC_API_KEY"];
+    expect(() => checkAnthropicApiKey()).toThrow(
+      "ANTHROPIC_API_KEY environment variable is required for Anthropic provider",
+    );
+  });
+
+  it("throws error when ANTHROPIC_API_KEY is empty string", () => {
+    process.env["ANTHROPIC_API_KEY"] = "";
+    expect(() => checkAnthropicApiKey()).toThrow(
+      "ANTHROPIC_API_KEY environment variable is required for Anthropic provider",
+    );
+  });
+
+  it("throws error when ANTHROPIC_API_KEY is only whitespace", () => {
+    process.env["ANTHROPIC_API_KEY"] = "   ";
+    expect(() => checkAnthropicApiKey()).toThrow(
+      "ANTHROPIC_API_KEY environment variable is required for Anthropic provider",
+    );
+  });
+
+  it("error message includes setup instructions", () => {
+    delete process.env["ANTHROPIC_API_KEY"];
+    expect(() => checkAnthropicApiKey()).toThrow("export ANTHROPIC_API_KEY=sk-ant-...");
+  });
+
+  it("error message mentions ollama alternative", () => {
+    delete process.env["ANTHROPIC_API_KEY"];
+    expect(() => checkAnthropicApiKey()).toThrow("provider.type: ollama for local models");
   });
 });

@@ -484,6 +484,23 @@ export function getDefaultConfig(): OrchestratorConfig {
 // =============================================================================
 
 /**
+ * Check if ANTHROPIC_API_KEY is set in the environment.
+ * Called before spawning sessions that use the Anthropic provider.
+ *
+ * @throws Error if ANTHROPIC_API_KEY is not set or empty
+ */
+export function checkAnthropicApiKey(): void {
+  const apiKey = process.env["ANTHROPIC_API_KEY"];
+  if (!apiKey || apiKey.trim() === "") {
+    throw new Error(
+      "ANTHROPIC_API_KEY environment variable is required for Anthropic provider.\n" +
+        "Set it with: export ANTHROPIC_API_KEY=sk-ant-...\n" +
+        "Or use provider.type: ollama for local models.",
+    );
+  }
+}
+
+/**
  * Check if Ollama is available at the specified endpoint.
  * Fetches /api/tags to verify Ollama is responding.
  *

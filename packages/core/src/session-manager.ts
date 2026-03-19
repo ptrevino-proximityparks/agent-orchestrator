@@ -38,7 +38,7 @@ import {
   type Issue,
   PR_STATE,
 } from "./types.js";
-import { checkOllamaHealth } from "./config.js";
+import { checkOllamaHealth, checkAnthropicApiKey } from "./config.js";
 import {
   readMetadataRaw,
   readArchivedMetadataRaw,
@@ -338,8 +338,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       throw new Error(`Agent plugin '${project.agent ?? config.defaults.agent}' not found`);
     }
 
-    // Validate provider (health check for Ollama)
+    // Validate provider
     if (project.provider?.type === "ollama") {
+      // Ollama: health check to ensure server is running
       const endpoint = project.provider.endpoint ?? "http://localhost:11434";
       console.log(
         `[ao] Provider: ollama at ${endpoint}` +
@@ -347,7 +348,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       );
       await checkOllamaHealth(endpoint);
     } else {
-      console.log("[ao] Provider: anthropic (default)");
+      // Anthropic (default): require API key
+      console.log(
+        "[ao] Provider: anthropic" +
+          (project.provider?.model ? ` (model: ${project.provider.model})` : ""),
+      );
+      checkAnthropicApiKey();
     }
 
     // Validate issue exists BEFORE creating any resources
