@@ -2,6 +2,7 @@
 
 dataDir: ~/.ao-sessions
 worktreeDir: ~/.worktrees/ao
+port: 3000
 
 defaults:
   runtime: tmux
@@ -12,7 +13,7 @@ defaults:
 projects:
   ao:
     name: Agent Orchestrator
-    repo: ptrevino-proximityparks/agent-orquestrator
+    repo: ptrevino-proximityparks/agent-orchestrator
     path: ~/Projects/agent-orquestrator
     defaultBranch: main
     sessionPrefix: ao
@@ -21,8 +22,61 @@ projects:
     tracker:
       plugin: linear
       teamId: "d74813c3-16ef-4b18-9a66-ebf976ea4ce4"
+      teamKey: "PRO"
     symlinks: [.claude]
     postCreate:
-      - "pnpm install"
+      - "pnpm install --frozen-lockfile"
     agentConfig:
       permissions: skip
+      model: sonnet
+    agentRules: |
+      ## Project Rules
+      - Follow ESM conventions: .js extensions in imports, node: prefix for builtins
+      - Use execFile (never exec) for shell commands — security critical
+      - Plugin pattern: export default { manifest, create } satisfies PluginModule<T>
+      - Run `pnpm typecheck && pnpm lint` before considering a task complete
+      - Use conventional commits: feat:, fix:, chore:, refactor:
+      - Create PR when implementation is complete and tests pass
+
+    # Reactions — auto-handle CI and review events
+    reactions:
+      ci-failed:
+        auto: true
+        action: send-to-agent
+        retries: 2
+        escalateAfter: 2
+      changes-requested:
+        auto: true
+        action: send-to-agent
+        escalateAfter: 30m
+      approved-and-green:
+        auto: false
+        action: notify
+        priority: action
+
+# Linear integration — auto-spawn + bidirectional status sync
+linear:
+  webhooks:
+    enabled: true
+    path: /webhooks/linear
+  statusMapping:
+    agent-spawned: "In Progress"
+    pr-created: "In Review"
+    ci-failed: "In Progress"
+    review-pending: "In Review"
+    changes-requested: "In Progress"
+    review-approved: "In Review"
+    merge-ready: "In Review"
+    pr-merged: "Done"
+  comments:
+    enabled: true
+    prefix: "🤖"
+  autoSpawn:
+    enabled: true
+    triggerStatus: "Todo"
+  mergeTrigger:
+    enabled: true
+    triggerStatus: "Done"
+    mergeMethod: squash
+  commentForwarding:
+    enabled: true
