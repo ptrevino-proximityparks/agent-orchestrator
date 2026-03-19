@@ -74,6 +74,11 @@ const DEFAULT_STATUS_MAPPING: Record<string, string> = {
   "session.spawned": "In Progress",
   "session.working": "In Progress",
   "pr.created": "In Review",
+  "ci.failing": "In Progress",
+  "review.pending": "In Review",
+  "review.changes_requested": "In Progress",
+  "review.approved": "In Review",
+  "merge.ready": "In Review",
   "pr.merged": "Done",
   "merge.completed": "Done",
 };
@@ -146,6 +151,9 @@ function formatCommentForEvent(
       return msg;
     }
 
+    case "review.pending":
+      return `${prefix} **Review pending** (${timestamp})\n\nPR is awaiting code review.`;
+
     case "session.stuck":
       return `${prefix} **⚠️ Agent stuck** (${timestamp})\n\nSession \`${event.sessionId}\` appears to be stuck and may need attention.`;
 
@@ -178,6 +186,11 @@ const STATUS_UPDATE_EVENTS: Set<EventType> = new Set([
   "session.spawned",
   "session.working",
   "pr.created",
+  "ci.failing",
+  "review.pending",
+  "review.changes_requested",
+  "review.approved",
+  "merge.ready",
   "pr.merged",
   "merge.completed",
 ]);
@@ -209,13 +222,28 @@ export function createLinearReporter(deps: LinearReporterDeps): LinearReporter {
       ...DEFAULT_STATUS_MAPPING,
     };
 
-    // Apply global status mapping
+    // Apply global status mapping (translate kebab-case config keys to dot-notation event types)
     if (globalStatusMapping["agent-spawned"]) {
       mergedStatusMapping["session.spawned"] = globalStatusMapping["agent-spawned"];
       mergedStatusMapping["session.working"] = globalStatusMapping["agent-spawned"];
     }
     if (globalStatusMapping["pr-created"]) {
       mergedStatusMapping["pr.created"] = globalStatusMapping["pr-created"];
+    }
+    if (globalStatusMapping["ci-failed"]) {
+      mergedStatusMapping["ci.failing"] = globalStatusMapping["ci-failed"];
+    }
+    if (globalStatusMapping["review-pending"]) {
+      mergedStatusMapping["review.pending"] = globalStatusMapping["review-pending"];
+    }
+    if (globalStatusMapping["changes-requested"]) {
+      mergedStatusMapping["review.changes_requested"] = globalStatusMapping["changes-requested"];
+    }
+    if (globalStatusMapping["review-approved"]) {
+      mergedStatusMapping["review.approved"] = globalStatusMapping["review-approved"];
+    }
+    if (globalStatusMapping["merge-ready"]) {
+      mergedStatusMapping["merge.ready"] = globalStatusMapping["merge-ready"];
     }
     if (globalStatusMapping["pr-merged"]) {
       mergedStatusMapping["pr.merged"] = globalStatusMapping["pr-merged"];

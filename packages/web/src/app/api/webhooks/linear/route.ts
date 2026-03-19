@@ -6,7 +6,8 @@
  *
  * Events handled:
  * - Issue.update with state change to "Todo" → AutoSpawn agent
- * - Comment.create → Ignored (to prevent loops)
+ * - Issue.update with state change to "Done" → Merge trigger (auto-merge PR)
+ * - Comment.create → Forward human comments to active agent
  *
  * CRITICAL: This endpoint must prevent infinite loops.
  * Bot-generated comments have known prefixes that we skip.
@@ -18,6 +19,8 @@ import { getServices } from "@/lib/services";
 import {
   createAutoSpawnHandler,
   isBotGeneratedComment,
+  handleMergeTrigger,
+  handleCommentForward,
   type LinearIssueContext,
 } from "@composio/ao-core";
 
@@ -119,29 +122,45 @@ function toIssueContext(data: LinearIssueData): LinearIssueContext {
 }
 
 // ---------------------------------------------------------------------------
-// Event handlers
+// Issue identifier resolution
 // ---------------------------------------------------------------------------
 
 /**
- * Handle Comment.create event.
- * Currently ignored to prevent loops.
+ * Resolve a Linear issue identifier from a comment webhook.
+ * Comment webhooks provide the issue UUID but not the identifier (e.g., "PRO-123").
+ * We try to find the identifier by searching active sessions.
  */
-function handleCommentCreate(comment: LinearCommentData): {
-  action: string;
-  details?: Record<string, unknown>;
-} {
-  // Skip bot comments to prevent loops
-  if (isBotGeneratedComment(comment.body ?? "")) {
-    return { action: "ignored", details: { reason: "bot comment detected" } };
+async function resolveIssueIdentifier(
+  _issueUUID: string,
+  _payload: LinearWebhookPayload,
+): Promise<string | null> {
+  // The Comment webhook payload may include the issue data in some cases.
+  // For now, we search sessions since the issue identifier is stored there.
+  const { sessionManager } = await getServices();
+  const sessions = await sessionManager.list();
+
+  // Search sessions — the issueId field stores the Linear identifier (e.g., "PRO-123")
+  // We can't match by UUID directly, so we look for any session that has
+  // a Linear issue and is currently active
+  // In practice, the Comment.create webhook doesn't reliably include the identifier,
+  // so we check if the payload has an embedded issue reference
+  const payloadData = _payload.data as Record<string, unknown>;
+  const issueRef = payloadData["issue"] as { id: string; identifier: string } | undefined;
+
+  if (issueRef?.identifier) {
+    return issueRef.identifier;
   }
 
-  // Check if user is the API key owner (bot user)
-  if (comment.user?.isMe === true) {
-    return { action: "ignored", details: { reason: "comment from API user" } };
+  // Fallback: search sessions that might match this issue UUID
+  // Sessions store the identifier (e.g., "PRO-123"), not the UUID
+  // If we can't resolve it, return null and the comment will be ignored
+  for (const session of sessions) {
+    if (session.issueId && session.metadata?.issueUUID === _issueUUID) {
+      return session.issueId;
+    }
   }
 
-  // Future: Could trigger agent to respond to human comments
-  return { action: "ignored", details: { reason: "comment handling not implemented" } };
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,10 +227,11 @@ export async function POST(request: NextRequest) {
   );
 
   // Get services
-  const { config, sessionManager } = await getServices();
+  const { config, registry, sessionManager } = await getServices();
 
   // Create AutoSpawn handler
   const autoSpawn = createAutoSpawnHandler({ config });
+  const actionsDeps = { config, registry };
 
   // Route to appropriate handler
   let result: { action: string; reason?: string; details?: Record<string, unknown> };
@@ -221,7 +241,39 @@ export async function POST(request: NextRequest) {
       case "Issue.update": {
         const issueData = payload.data as LinearIssueData;
         const issueContext = toIssueContext(issueData);
-        const spawnResult = await autoSpawn.handleIssueStatusChange(issueContext, sessionManager);
+
+        // 1. Try auto-spawn (issue → "Todo")
+        const spawnResult = await autoSpawn.handleIssueStatusChange(
+          issueContext,
+          sessionManager,
+        );
+
+        if (spawnResult.action === "spawned" || spawnResult.action === "error") {
+          result = {
+            action: spawnResult.action,
+            reason: spawnResult.reason,
+            details: spawnResult.details,
+          };
+          break;
+        }
+
+        // 2. Try merge trigger (issue → "Done")
+        const mergeResult = await handleMergeTrigger(
+          issueContext,
+          actionsDeps,
+          sessionManager,
+        );
+
+        if (mergeResult.action !== "skipped") {
+          result = {
+            action: mergeResult.action,
+            reason: mergeResult.reason,
+            details: mergeResult.details,
+          };
+          break;
+        }
+
+        // 3. Neither triggered — report the spawn result
         result = {
           action: spawnResult.action,
           reason: spawnResult.reason,
@@ -230,9 +282,49 @@ export async function POST(request: NextRequest) {
         break;
       }
 
-      case "Comment.create":
-        result = handleCommentCreate(payload.data as LinearCommentData);
+      case "Comment.create": {
+        const comment = payload.data as LinearCommentData;
+
+        // Skip bot comments to prevent loops
+        if (isBotGeneratedComment(comment.body ?? "")) {
+          result = { action: "ignored", details: { reason: "bot comment detected" } };
+          break;
+        }
+
+        // Skip comments from the API key owner (our bot user)
+        if (comment.user?.isMe === true) {
+          result = { action: "ignored", details: { reason: "comment from API user" } };
+          break;
+        }
+
+        // Resolve issue identifier for the comment's issue
+        const issueIdentifier = await resolveIssueIdentifier(comment.issueId, payload);
+
+        if (!issueIdentifier) {
+          result = { action: "ignored", details: { reason: "could not resolve issue identifier" } };
+          break;
+        }
+
+        // Forward human comment to active agent
+        const forwardResult = await handleCommentForward(
+          {
+            id: comment.id,
+            body: comment.body,
+            issueId: comment.issueId,
+            user: comment.user,
+          },
+          issueIdentifier,
+          actionsDeps,
+          sessionManager,
+        );
+
+        result = {
+          action: forwardResult.action,
+          reason: forwardResult.reason,
+          details: forwardResult.details,
+        };
         break;
+      }
 
       default:
         // Unknown event type — acknowledge but don't process
