@@ -147,6 +147,32 @@ pnpm test              # run tests
 pnpm lint && pnpm typecheck
 ```
 
+## Quick Control (Linear + Webhooks)
+
+Control rápido del daemon que conecta con Linear via webhooks.
+
+### Apagar (desconectar Linear)
+
+```bash
+pkill -f "ao-daemon" ; pkill -f "cloudflared" ; pkill -f "next-server" ; pkill -f "concurrently.*npm:dev" ; rm -f ~/.ao-sessions/pids/*.pid ~/.ao-sessions/pids/tunnel-url.txt
+```
+
+**Efecto**: Linear sigue funcionando, pero no triggerea agentes. Webhooks fallan silenciosamente.
+
+### Encender (reconectar Linear)
+
+```bash
+cd ~/Projects/agent-orquestrator && ./scripts/ao-daemon.sh ao &
+```
+
+**Efecto**: Inicia dashboard + tunnel + registra webhook en Linear automáticamente.
+
+### Ver estado
+
+```bash
+./scripts/ao-ctl.sh status
+```
+
 ## Development Workflow
 
 ### Running the Dev Server
@@ -211,6 +237,38 @@ Then use `browser_navigate` as normal. If Playwright was previously used in the 
 ## Config
 
 Config loaded from `agent-orchestrator.yaml` (see `agent-orchestrator.yaml.example`). Paths support `~` expansion. Validated with Zod at load time. Per-project overrides for plugins and reactions.
+
+### Provider Configuration
+
+Projects can configure which AI provider to use. Claude Code natively supports multiple backends via environment variables.
+
+**Anthropic (default):**
+```yaml
+projects:
+  my-project:
+    repo: org/repo
+    path: ~/my-project
+    # No provider config needed - uses ANTHROPIC_API_KEY from environment
+```
+
+**Ollama (local):**
+```yaml
+projects:
+  my-project:
+    repo: org/repo
+    path: ~/my-project
+    provider:
+      type: ollama
+      model: qwen3:8b  # Optional: specific model
+      endpoint: http://localhost:11434  # Optional: custom endpoint
+```
+
+When a session is spawned with Ollama provider, the orchestrator sets:
+- `ANTHROPIC_AUTH_TOKEN=ollama`
+- `ANTHROPIC_API_KEY=""`
+- `ANTHROPIC_BASE_URL=<endpoint>`
+
+This enables using local models for cheaper/faster experimentation while keeping Anthropic for production.
 
 ## Design Decisions
 

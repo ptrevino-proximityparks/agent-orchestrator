@@ -1,6 +1,7 @@
 import {
   shellEscape,
   readLastJsonlEntry,
+  getProviderEnvVars,
   DEFAULT_READY_THRESHOLD_MS,
   type Agent,
   type AgentSessionInfo,
@@ -630,6 +631,15 @@ function createClaudeCodeAgent(): Agent {
     processName: "claude",
     promptDelivery: "post-launch",
 
+    // Auto-accept the "Bypass Permissions mode" confirmation prompt.
+    // When --dangerously-skip-permissions is used, Claude Code shows an interactive
+    // menu: 1. No, exit (default) / 2. Yes, I accept. We send Down+Enter to accept.
+    // Timing: 2s for Claude to render the prompt, then Down, then Enter.
+    postLaunchKeys: [
+      { keys: "Down", delayMs: 2_000 },
+      { keys: "Enter", delayMs: 200 },
+    ],
+
     getLaunchCommand(config: AgentLaunchConfig): string {
       // Note: CLAUDECODE is unset via getEnvironment() (set to ""), not here.
       // This command must be safe for both shell and execFile contexts.
@@ -639,8 +649,10 @@ function createClaudeCodeAgent(): Agent {
         parts.push("--dangerously-skip-permissions");
       }
 
-      if (config.model) {
-        parts.push("--model", shellEscape(config.model));
+      // Use explicit model, or fall back to provider's model if configured
+      const model = config.model ?? config.provider?.model;
+      if (model) {
+        parts.push("--model", shellEscape(model));
       }
 
       if (config.systemPromptFile) {
@@ -676,6 +688,28 @@ function createClaudeCodeAgent(): Agent {
 
       if (config.issueId) {
         env["AO_ISSUE_ID"] = config.issueId;
+      }
+
+      // Apply provider-specific environment variables
+      // For Ollama: ANTHROPIC_AUTH_TOKEN=ollama, ANTHROPIC_API_KEY="", ANTHROPIC_BASE_URL
+      // For Anthropic: uses system defaults
+      const providerEnv = getProviderEnvVars(config.provider);
+      Object.assign(env, providerEnv);
+
+      // Only forward Anthropic credentials if NOT using Ollama provider
+      // (Ollama sets its own ANTHROPIC_* vars via getProviderEnvVars)
+      if (!config.provider || config.provider.type === "anthropic") {
+        // Forward authentication credentials so headless tmux agents can authenticate.
+        // Without this, tmux sessions created by the orchestrator cannot access the
+        // parent process's OAuth token (tmux doesn't inherit the spawner's env vars).
+        // Priority: ANTHROPIC_API_KEY (never expires) > CLAUDE_CODE_OAUTH_TOKEN (session-scoped)
+        const apiKey = process.env["ANTHROPIC_API_KEY"];
+        const oauthToken = process.env["CLAUDE_CODE_OAUTH_TOKEN"];
+        if (apiKey) {
+          env["ANTHROPIC_API_KEY"] = apiKey;
+        } else if (oauthToken) {
+          env["CLAUDE_CODE_OAUTH_TOKEN"] = oauthToken;
+        }
       }
 
       return env;

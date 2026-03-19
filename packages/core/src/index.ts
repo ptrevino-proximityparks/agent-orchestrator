@@ -16,6 +16,8 @@ export {
   getDefaultConfig,
   findConfig,
   findConfigFile,
+  getProviderEnvVars,
+  checkOllamaHealth,
 } from "./config.js";
 
 // Plugin registry
@@ -64,6 +66,10 @@ export type {
   AutoSpawnResult,
   LinearIssueContext,
 } from "./auto-spawn.js";
+
+// Linear actions — merge trigger + comment forwarding from Linear webhooks
+export { handleMergeTrigger, handleCommentForward } from "./linear-actions.js";
+export type { MergeTriggerConfig, LinearCommentContext } from "./linear-actions.js";
 
 // Prompt builder — layered prompt composition
 export { buildPrompt, BASE_AGENT_PROMPT } from "./prompt-builder.js";

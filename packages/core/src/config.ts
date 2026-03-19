@@ -15,7 +15,7 @@ import { resolve, join, basename } from "node:path";
 import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import type { OrchestratorConfig } from "./types.js";
+import type { OrchestratorConfig, ProviderConfig } from "./types.js";
 import { generateSessionPrefix } from "./paths.js";
 
 // =============================================================================
@@ -51,6 +51,15 @@ const NotifierConfigSchema = z
   })
   .passthrough();
 
+const ProviderConfigSchema = z.object({
+  /** Provider type: 'anthropic' (default) or 'ollama' (local) */
+  type: z.enum(["anthropic", "ollama"]).default("anthropic"),
+  /** Model name (e.g., 'qwen3:8b' for Ollama) */
+  model: z.string().optional(),
+  /** API endpoint (only for ollama, defaults to http://localhost:11434) */
+  endpoint: z.string().optional(),
+});
+
 const AgentSpecificConfigSchema = z
   .object({
     permissions: z.enum(["skip", "default"]).default("skip"),
@@ -79,6 +88,8 @@ const ProjectConfigSchema = z.object({
   agentRules: z.string().optional(),
   agentRulesFile: z.string().optional(),
   orchestratorRules: z.string().optional(),
+  /** Provider configuration for AI model backend (defaults to anthropic) */
+  provider: ProviderConfigSchema.optional(),
 });
 
 const DefaultPluginsSchema = z.object({
@@ -100,6 +111,11 @@ const LinearConfigSchema = z
       .object({
         "agent-spawned": z.string().default("In Progress"),
         "pr-created": z.string().default("In Review"),
+        "ci-failed": z.string().optional(),
+        "review-pending": z.string().optional(),
+        "changes-requested": z.string().optional(),
+        "review-approved": z.string().optional(),
+        "merge-ready": z.string().optional(),
         "pr-merged": z.string().default("Done"),
       })
       .optional(),
@@ -113,6 +129,18 @@ const LinearConfigSchema = z
       .object({
         enabled: z.boolean().default(true),
         triggerStatus: z.union([z.string(), z.array(z.string())]).default("Todo"),
+      })
+      .optional(),
+    mergeTrigger: z
+      .object({
+        enabled: z.boolean().default(false),
+        triggerStatus: z.union([z.string(), z.array(z.string())]).default("Done"),
+        mergeMethod: z.enum(["squash", "merge", "rebase"]).default("squash"),
+      })
+      .optional(),
+    commentForwarding: z
+      .object({
+        enabled: z.boolean().default(false),
       })
       .optional(),
   })
@@ -449,4 +477,65 @@ export function getDefaultConfig(): OrchestratorConfig {
   return validateConfig({
     projects: {},
   });
+}
+
+// =============================================================================
+// PROVIDER HELPERS
+// =============================================================================
+
+/**
+ * Check if Ollama is available at the specified endpoint.
+ * Fetches /api/tags to verify Ollama is responding.
+ *
+ * @param endpoint - Ollama API endpoint (defaults to http://localhost:11434)
+ * @throws Error if Ollama is not responding
+ */
+export async function checkOllamaHealth(endpoint: string = "http://localhost:11434"): Promise<void> {
+  const url = `${endpoint}/api/tags`;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5_000);
+
+    const response = await fetch(url, {
+      method: "GET",
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      throw new Error(`Ollama returned status ${response.status}`);
+    }
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Ollama not responding at ${endpoint} (timeout after 5s)`, { cause: err });
+    }
+    throw new Error(`Ollama not available at ${endpoint}: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+  }
+}
+
+/**
+ * Get environment variables for a provider configuration.
+ * Claude Code natively supports Ollama via these env vars.
+ *
+ * @param provider - Provider configuration (anthropic or ollama)
+ * @returns Environment variables to set for the agent process
+ */
+export function getProviderEnvVars(provider: ProviderConfig | undefined): Record<string, string> {
+  if (!provider || provider.type === "anthropic") {
+    // Anthropic uses system defaults (ANTHROPIC_API_KEY from environment)
+    return {};
+  }
+
+  if (provider.type === "ollama") {
+    return {
+      ANTHROPIC_AUTH_TOKEN: "ollama",
+      ANTHROPIC_API_KEY: "",
+      ANTHROPIC_BASE_URL: provider.endpoint ?? "http://localhost:11434",
+      // If a specific model is configured, set it as default
+      ...(provider.model ? { ANTHROPIC_MODEL: provider.model } : {}),
+    };
+  }
+
+  // Future provider types can be added here
+  return {};
 }

@@ -48,6 +48,12 @@ projects:
     #   permissions: skip    # --dangerously-skip-permissions
     #   model: opus
 
+    # Provider configuration (defaults to Anthropic API)
+    # provider:
+    #   type: ollama          # 'anthropic' | 'ollama'
+    #   model: qwen3:8b       # Model for Ollama
+    #   endpoint: http://localhost:11434  # Ollama endpoint
+
     # Inline rules included in every agent prompt for this project
     # agentRules: |
     #   Always run tests before pushing.

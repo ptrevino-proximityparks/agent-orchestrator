@@ -38,6 +38,7 @@ import {
   type Issue,
   PR_STATE,
 } from "./types.js";
+import { checkOllamaHealth } from "./config.js";
 import {
   readMetadataRaw,
   readArchivedMetadataRaw,
@@ -337,6 +338,18 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       throw new Error(`Agent plugin '${project.agent ?? config.defaults.agent}' not found`);
     }
 
+    // Validate provider (health check for Ollama)
+    if (project.provider?.type === "ollama") {
+      const endpoint = project.provider.endpoint ?? "http://localhost:11434";
+      console.log(
+        `[ao] Provider: ollama at ${endpoint}` +
+          (project.provider.model ? ` (model: ${project.provider.model})` : ""),
+      );
+      await checkOllamaHealth(endpoint);
+    } else {
+      console.log("[ao] Provider: anthropic (default)");
+    }
+
     // Validate issue exists BEFORE creating any resources
     let resolvedIssue: Issue | undefined;
     if (spawnConfig.issueId && plugins.tracker) {
@@ -477,6 +490,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       prompt: composedPrompt ?? spawnConfig.prompt,
       permissions: project.agentConfig?.permissions,
       model: project.agentConfig?.model,
+      provider: project.provider,
     };
 
     let handle: RuntimeHandle;
@@ -566,6 +580,20 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         /* best effort */
       }
       throw err;
+    }
+
+    // Auto-accept interactive prompts (e.g. Claude Code's "Bypass Permissions" confirmation).
+    // postLaunchKeys sends raw tmux keys (arrows, Enter) to navigate/accept prompts.
+    // This runs before the initial prompt so the agent is fully ready.
+    if (plugins.agent.postLaunchKeys && plugins.agent.postLaunchKeys.length > 0) {
+      try {
+        for (const { keys, delayMs } of plugins.agent.postLaunchKeys) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          await plugins.runtime.sendKeys(handle, keys);
+        }
+      } catch {
+        // Non-fatal: agent may not need the keys (prompt may not appear)
+      }
     }
 
     // Send initial prompt post-launch for agents that need it (e.g. Claude Code

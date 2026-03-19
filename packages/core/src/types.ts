@@ -207,6 +207,13 @@ export interface Runtime {
   /** Send a text message/prompt to the running agent */
   sendMessage(handle: RuntimeHandle, message: string): Promise<void>;
 
+  /**
+   * Send raw keys to the session (e.g. arrow keys, Enter, Escape).
+   * Unlike sendMessage which sends literal text + Enter, this sends tmux key names.
+   * Used for navigating interactive prompts (e.g. "Down" to select menu items).
+   */
+  sendKeys(handle: RuntimeHandle, keys: string): Promise<void>;
+
   /** Capture recent output from the session */
   getOutput(handle: RuntimeHandle, lines?: number): Promise<string>;
 
@@ -310,6 +317,14 @@ export interface Agent {
   postLaunchSetup?(session: Session): Promise<void>;
 
   /**
+   * Optional: keys to send after the launch command to auto-accept prompts.
+   * Useful for agents that show interactive confirmation prompts (e.g. Claude Code's
+   * "Bypass Permissions mode" confirmation). Each entry is a { keys, delayMs } pair.
+   * The runtime sends the keys in order with the specified delays.
+   */
+  readonly postLaunchKeys?: ReadonlyArray<{ keys: string; delayMs: number }>;
+
+  /**
    * Optional: Set up agent-specific hooks/config in the workspace for automatic metadata updates.
    * Called once per workspace during ao init/start and when creating new worktrees.
    *
@@ -325,6 +340,16 @@ export interface Agent {
   setupWorkspaceHooks?(workspacePath: string, config: WorkspaceHooksConfig): Promise<void>;
 }
 
+/** Provider configuration for AI model backends */
+export interface ProviderConfig {
+  /** Provider type: 'anthropic' (default) or 'ollama' (local) */
+  type: "anthropic" | "ollama";
+  /** Model name (e.g., 'qwen3:8b' for Ollama) */
+  model?: string;
+  /** API endpoint (only for ollama, defaults to http://localhost:11434) */
+  endpoint?: string;
+}
+
 export interface AgentLaunchConfig {
   sessionId: SessionId;
   projectConfig: ProjectConfig;
@@ -332,6 +357,8 @@ export interface AgentLaunchConfig {
   prompt?: string;
   permissions?: "skip" | "default";
   model?: string;
+  /** Provider configuration for this session */
+  provider?: ProviderConfig;
   /**
    * System prompt to pass to the agent for orchestrator context.
    * - Claude Code: --append-system-prompt
@@ -1044,6 +1071,13 @@ export interface ReactionResult {
   escalated: boolean;
 }
 
+/** Result from Linear-triggered actions (merge trigger, comment forwarding) */
+export interface LinearActionResult {
+  action: "merged" | "forwarded" | "skipped" | "failed";
+  reason?: string;
+  details?: Record<string, unknown>;
+}
+
 // =============================================================================
 // CONFIGURATION
 // =============================================================================
@@ -1063,28 +1097,40 @@ export interface LinearConfig {
 
   /** Status mapping from events to Linear status names */
   statusMapping?: {
-    /** Status when agent starts working (default: "In Progress") */
     "agent-spawned"?: string;
-    /** Status when PR is created (default: "In Review") */
     "pr-created"?: string;
-    /** Status when PR is merged (default: "Done") */
+    "ci-failed"?: string;
+    "review-pending"?: string;
+    "changes-requested"?: string;
+    "review-approved"?: string;
+    "merge-ready"?: string;
     "pr-merged"?: string;
   };
 
   /** Comment posting configuration */
   comments?: {
-    /** Enable automatic comments (default: true) */
     enabled?: boolean;
-    /** Prefix for all bot comments (default: "🤖") */
     prefix?: string;
   };
 
   /** AutoSpawn configuration */
   autoSpawn?: {
-    /** Enable automatic spawning on status change (default: true) */
     enabled?: boolean;
-    /** Status name(s) that trigger spawn (default: "Todo") */
     triggerStatus?: string | string[];
+  };
+
+  /** Merge trigger — auto-merge PR when issue status changes in Linear */
+  mergeTrigger?: {
+    enabled?: boolean;
+    /** Status name(s) that trigger merge (default: "Done") */
+    triggerStatus?: string | string[];
+    /** Merge method (default: "squash") */
+    mergeMethod?: "squash" | "merge" | "rebase";
+  };
+
+  /** Comment forwarding — forward human comments from Linear to active agents */
+  commentForwarding?: {
+    enabled?: boolean;
   };
 }
 
@@ -1186,6 +1232,9 @@ export interface ProjectConfig {
 
   /** Rules for the orchestrator agent (stored, reserved for future use) */
   orchestratorRules?: string;
+
+  /** Provider configuration for AI model backend (defaults to anthropic) */
+  provider?: ProviderConfig;
 }
 
 export interface TrackerConfig {
