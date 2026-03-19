@@ -147,6 +147,12 @@ export function create(): Runtime {
       await tmux("send-keys", "-t", handle.id, "Enter");
     },
 
+    async sendKeys(handle: RuntimeHandle, keys: string): Promise<void> {
+      // Send raw tmux key names (e.g. "Down", "Enter", "Escape")
+      // Unlike sendMessage which uses -l for literal text, this sends key names directly
+      await tmux("send-keys", "-t", handle.id, keys);
+    },
+
     async getOutput(handle: RuntimeHandle, lines = 50): Promise<string> {
       try {
         return await tmux("capture-pane", "-t", handle.id, "-p", "-S", `-${lines}`);

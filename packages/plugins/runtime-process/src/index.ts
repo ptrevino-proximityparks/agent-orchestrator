@@ -235,6 +235,12 @@ export function create(): Runtime {
       });
     },
 
+    async sendKeys(handle: RuntimeHandle, keys: string): Promise<void> {
+      // Process runtime doesn't support raw key sends (no TTY navigation).
+      // For agents with interactive prompts, use tmux runtime instead.
+      await this.sendMessage(handle, keys);
+    },
+
     async getOutput(handle: RuntimeHandle, lines = 50): Promise<string> {
       const entry = processes.get(handle.id);
       if (!entry) return "";

@@ -46,6 +46,7 @@ beforeEach(() => {
     create: vi.fn().mockResolvedValue(makeHandle("rt-1")),
     destroy: vi.fn().mockResolvedValue(undefined),
     sendMessage: vi.fn().mockResolvedValue(undefined),
+    sendKeys: vi.fn().mockResolvedValue(undefined),
     getOutput: vi.fn().mockResolvedValue(""),
     isAlive: vi.fn().mockResolvedValue(true),
   };
