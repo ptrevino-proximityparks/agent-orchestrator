@@ -129,6 +129,11 @@ projects:
     defaultBranch: main
     sessionPrefix: app
 
+    # Optional: Use Ollama instead of Anthropic API
+    # provider:
+    #   type: ollama
+    #   model: qwen3:8b
+
 reactions:
   ci-failed:
     auto: true
@@ -142,6 +147,17 @@ reactions:
     auto: false       # flip to true for auto-merge
     action: notify
 ```
+
+### Providers
+
+Agent Orchestrator supports multiple AI providers:
+
+| Provider | Use Case | Requirements |
+|----------|----------|--------------|
+| **Anthropic** (default) | Production, best quality | `ANTHROPIC_API_KEY` |
+| **Ollama** (local) | Development, no API costs | Ollama installed |
+
+See [Provider Configuration](docs/providers.md) for setup details.
 
 CI fails → agent gets the logs and fixes it. Reviewer requests changes → agent addresses them. PR approved with green CI → you get a notification to merge.
 
@@ -189,6 +205,8 @@ See [CLAUDE.md](CLAUDE.md) for code conventions and architecture details.
 | Doc | What it covers |
 |-----|---------------|
 | [Setup Guide](SETUP.md) | Detailed installation and configuration |
+| [Provider Configuration](docs/providers.md) | Anthropic vs Ollama, mixed providers |
+| [Ollama Setup](docs/ollama-setup.md) | Install and configure local models |
 | [Linear-First Mode](docs/LINEAR-FIRST.md) | Use Linear as single source of truth for issues |
 | [Examples](examples/) | Config templates (GitHub, Linear, multi-project, auto-merge) |
 | [CLAUDE.md](CLAUDE.md) | Architecture, conventions, plugin pattern |
