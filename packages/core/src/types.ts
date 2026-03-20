@@ -167,6 +167,13 @@ export interface Session {
   /** When this session was last restored (undefined if never restored) */
   restoredAt?: Date;
 
+  /**
+   * Provider used for this session ("anthropic" | "ollama" | "legacy").
+   * Immutable after creation - sessions keep their original provider
+   * even if the project config changes.
+   */
+  provider: string;
+
   /** Metadata key-value pairs */
   metadata: Record<string, string>;
 }

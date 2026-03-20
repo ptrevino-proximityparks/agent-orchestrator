@@ -154,6 +154,7 @@ function metadataToSession(
     createdAt: meta["createdAt"] ? new Date(meta["createdAt"]) : (createdAt ?? new Date()),
     lastActivityAt: modifiedAt ?? new Date(),
     restoredAt: meta["restoredAt"] ? new Date(meta["restoredAt"]) : undefined,
+    provider: meta["provider"] ?? "legacy",
     metadata: meta,
   };
 }
@@ -533,6 +534,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       throw err;
     }
 
+    // Determine provider type for the session object
+    const providerType = project.provider?.type ?? "anthropic";
+
     // Write metadata and run post-launch setup — clean up on failure
     const session: Session = {
       id: sessionId,
@@ -547,6 +551,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       agentInfo: null,
       createdAt: new Date(),
       lastActivityAt: new Date(),
+      provider: providerType,
       metadata: {},
     };
 
@@ -705,6 +710,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       },
     });
 
+    // Orchestrator uses project's provider config (or anthropic default)
+    const providerType = project.provider?.type ?? "anthropic";
+
     // Write metadata and run post-launch setup
     const session: Session = {
       id: sessionId,
@@ -719,12 +727,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       agentInfo: null,
       createdAt: new Date(),
       lastActivityAt: new Date(),
+      provider: providerType,
       metadata: {},
     };
 
     try {
-      // Orchestrator uses project's provider config (or anthropic default)
-      const providerType = project.provider?.type ?? "anthropic";
       const providerConfig = project.provider
         ? JSON.stringify({
             type: project.provider.type,

@@ -42,6 +42,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     agentInfo: null,
     createdAt: new Date(),
     lastActivityAt: new Date(),
+    provider: "anthropic",
     metadata: {},
     ...overrides,
   };

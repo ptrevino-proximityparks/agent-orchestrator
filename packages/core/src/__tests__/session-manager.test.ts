@@ -1838,6 +1838,65 @@ describe("provider metadata", () => {
     expect(meta!["provider"]).toBe("ollama");
     expect(meta!["providerConfig"]).toBe(providerConfig);
   });
+
+  it("Session.provider reflects stored metadata even if global config changes", async () => {
+    // 1. Spawn a session with Ollama provider
+    const ollamaConfig: OrchestratorConfig = {
+      ...config,
+      projects: {
+        "my-app": {
+          ...config.projects["my-app"],
+          provider: {
+            type: "ollama",
+            model: "llama3:8b",
+          },
+        },
+      },
+    };
+    const sm = createSessionManager({ config: ollamaConfig, registry: mockRegistry });
+    await sm.spawn({ projectId: "my-app" });
+
+    // Verify initial state
+    const sessionBefore = await sm.get("app-1");
+    expect(sessionBefore?.provider).toBe("ollama");
+
+    // 2. Create a new session manager with Anthropic config (simulating global toggle change)
+    const anthropicConfig: OrchestratorConfig = {
+      ...config,
+      projects: {
+        "my-app": {
+          ...config.projects["my-app"],
+          provider: { type: "anthropic" },
+        },
+      },
+    };
+    const sm2 = createSessionManager({ config: anthropicConfig, registry: mockRegistry });
+
+    // 3. Get the existing session - it should still report ollama (from metadata)
+    const sessionAfter = await sm2.get("app-1");
+    expect(sessionAfter?.provider).toBe("ollama");
+
+    // 4. List sessions - should also reflect stored provider
+    const sessions = await sm2.list("my-app");
+    const listedSession = sessions.find((s) => s.id === "app-1");
+    expect(listedSession?.provider).toBe("ollama");
+  });
+
+  it("legacy sessions without provider field show 'legacy'", async () => {
+    // Simulate a session created before provider tracking was added
+    writeMetadata(sessionsDir, "legacy-session", {
+      worktree: "/tmp/legacy",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      // No provider or providerConfig fields
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const session = await sm.get("legacy-session");
+
+    expect(session?.provider).toBe("legacy");
+  });
 });
 
 describe("isIssueNotFoundError", () => {
