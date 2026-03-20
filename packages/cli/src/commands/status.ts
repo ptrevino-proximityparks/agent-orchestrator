@@ -328,6 +328,7 @@ async function showFallbackStatus(): Promise<void> {
         createdAt: new Date(),
         lastActivityAt: new Date(),
         metadata: {},
+        provider: "anthropic",
       };
       const introspection = await agent.getSessionInfo(sessionObj);
       if (introspection?.summary) {

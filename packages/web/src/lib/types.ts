@@ -72,6 +72,11 @@ export interface DashboardSession {
   lastActivityAt: string;
   pr: DashboardPR | null;
   metadata: Record<string, string>;
+  /**
+   * Provider used for this session ("anthropic" | "ollama" | "legacy").
+   * Immutable after creation — displayed as badge in session cell.
+   */
+  provider: string;
 }
 
 /**

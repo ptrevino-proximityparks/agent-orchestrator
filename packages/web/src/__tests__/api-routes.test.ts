@@ -26,6 +26,7 @@ function makeSession(overrides: Partial<Session> & { id: string }): Session {
     createdAt: new Date(),
     lastActivityAt: new Date(),
     metadata: {},
+    provider: "anthropic",
     ...overrides,
   };
 }

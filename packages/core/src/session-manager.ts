@@ -489,6 +489,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       userPrompt: spawnConfig.prompt,
     });
 
+    // Resolve provider: spawnConfig override > project config > default (anthropic)
+    const effectiveProvider = spawnConfig.provider ?? project.provider;
+
     // Get agent launch config and create runtime — clean up workspace on failure
     const agentLaunchConfig = {
       sessionId,
@@ -497,7 +500,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       prompt: composedPrompt ?? spawnConfig.prompt,
       permissions: project.agentConfig?.permissions,
       model: project.agentConfig?.model,
-      provider: project.provider,
+      provider: effectiveProvider,
     };
 
     let handle: RuntimeHandle;
@@ -535,7 +538,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     }
 
     // Determine provider type for the session object
-    const providerType = project.provider?.type ?? "anthropic";
+    const providerType = effectiveProvider?.type ?? "anthropic";
 
     // Write metadata and run post-launch setup — clean up on failure
     const session: Session = {

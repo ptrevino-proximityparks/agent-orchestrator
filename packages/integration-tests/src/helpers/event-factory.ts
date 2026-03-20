@@ -44,6 +44,7 @@ export function makeSession(overrides: Partial<Session> = {}): Session {
     createdAt: new Date("2025-06-15T12:00:00Z"),
     lastActivityAt: new Date("2025-06-15T12:00:00Z"),
     metadata: {},
+    provider: "anthropic",
     ...overrides,
   };
 }

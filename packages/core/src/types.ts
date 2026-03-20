@@ -186,6 +186,8 @@ export interface SessionSpawnConfig {
   prompt?: string;
   /** Override the agent plugin for this session (e.g. "codex", "claude-code") */
   agent?: string;
+  /** Override the provider for this session (overrides project config) */
+  provider?: ProviderConfig;
 }
 
 /** Config for creating an orchestrator session */

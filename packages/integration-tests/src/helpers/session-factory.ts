@@ -33,5 +33,6 @@ export function makeSession(
     createdAt: new Date(),
     lastActivityAt: new Date(),
     metadata: {},
+    provider: "anthropic",
   };
 }

@@ -35,6 +35,13 @@ const STATUS_COLORS: Record<string, { bg: string; text: string }> = {
   terminated: { bg: "#2a2a2a", text: "#8b949e" },
 };
 
+// Provider → color mapping for badges
+const PROVIDER_COLORS: Record<string, { bg: string; text: string; icon: string }> = {
+  anthropic: { bg: "#2d1a1a", text: "#ff7b72", icon: "A" },
+  ollama: { bg: "#1a2d1a", text: "#7ee787", icon: "O" },
+  legacy: { bg: "#2a2a2a", text: "#8b949e", icon: "?" },
+};
+
 // Activity state → dot color
 function activityDotColor(activity: ActivityState | null): string {
   switch (activity) {
@@ -112,6 +119,24 @@ export function TerminalCell({ session }: TerminalCellProps) {
 
         {/* Spacer */}
         <div style={{ flex: 1 }} />
+
+        {/* Provider badge */}
+        {session.provider && session.provider !== "legacy" && (
+          <span
+            title={`Provider: ${session.provider}`}
+            style={{
+              fontSize: 10,
+              fontWeight: 600,
+              color: (PROVIDER_COLORS[session.provider] ?? PROVIDER_COLORS.legacy).text,
+              background: (PROVIDER_COLORS[session.provider] ?? PROVIDER_COLORS.legacy).bg,
+              padding: "2px 5px",
+              borderRadius: 4,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {(PROVIDER_COLORS[session.provider] ?? PROVIDER_COLORS.legacy).icon}
+          </span>
+        )}
 
         {/* Issue badge */}
         {issueLabel && (

@@ -1,10 +1,15 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import type { DashboardSession } from "@/lib/types";
 import { useSessionEvents } from "@/hooks/useSessionEvents";
 import { TerminalCell } from "./TerminalCell";
 import { DynamicFavicon } from "./DynamicFavicon";
+import {
+  ProviderSelector,
+  loadProviderConfig,
+  type ProviderConfig,
+} from "./ProviderSelector";
 
 interface TerminalGridProps {
   initialSessions: DashboardSession[];
@@ -17,6 +22,12 @@ const TERMINAL_STATUSES = new Set(["killed", "terminated", "done", "merged", "cl
 export function TerminalGrid({ initialSessions, orchestratorId, projectName }: TerminalGridProps) {
   const sessions = useSessionEvents(initialSessions);
   const [showCompleted, setShowCompleted] = useState(false);
+  const [providerConfig, setProviderConfig] = useState<ProviderConfig>({ type: "anthropic" });
+
+  // Load provider config from localStorage on mount
+  useEffect(() => {
+    setProviderConfig(loadProviderConfig());
+  }, []);
 
   const { active, completed } = useMemo(() => {
     const act: DashboardSession[] = [];
@@ -68,6 +79,9 @@ export function TerminalGrid({ initialSessions, orchestratorId, projectName }: T
           {completed.length > 0 && ` · ${completed.length} done`}
           {totalCount === 0 && " · no sessions"}
         </span>
+
+        {/* Provider selector */}
+        <ProviderSelector value={providerConfig} onChange={setProviderConfig} />
 
         {/* Orchestrator link */}
         {orchestratorId && (
