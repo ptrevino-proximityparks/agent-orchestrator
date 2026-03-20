@@ -551,6 +551,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     };
 
     try {
+      // Determine provider type and config for metadata
+      const providerType = project.provider?.type ?? "anthropic";
+      const providerConfig = project.provider
+        ? JSON.stringify({
+            type: project.provider.type,
+            model: project.provider.model,
+            endpoint: project.provider.endpoint,
+          })
+        : undefined;
+
       writeMetadata(sessionsDir, sessionId, {
         worktree: workspacePath,
         branch,
@@ -561,6 +571,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         agent: plugins.agent.name, // Persist agent name for lifecycle manager
         createdAt: new Date().toISOString(),
         runtimeHandle: JSON.stringify(handle),
+        provider: providerType, // Immutable after creation
+        providerConfig, // Full config for traceability
       });
 
       if (plugins.agent.postLaunchSetup) {
@@ -711,6 +723,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     };
 
     try {
+      // Orchestrator uses project's provider config (or anthropic default)
+      const providerType = project.provider?.type ?? "anthropic";
+      const providerConfig = project.provider
+        ? JSON.stringify({
+            type: project.provider.type,
+            model: project.provider.model,
+            endpoint: project.provider.endpoint,
+          })
+        : undefined;
+
       writeMetadata(sessionsDir, sessionId, {
         worktree: project.path,
         branch: project.defaultBranch,
@@ -720,6 +742,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         project: orchestratorConfig.projectId,
         createdAt: new Date().toISOString(),
         runtimeHandle: JSON.stringify(handle),
+        provider: providerType,
+        providerConfig,
       });
 
       if (plugins.agent.postLaunchSetup) {
@@ -1046,6 +1070,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         project: raw["project"],
         createdAt: raw["createdAt"],
         runtimeHandle: raw["runtimeHandle"],
+        provider: raw["provider"],
+        providerConfig: raw["providerConfig"],
       });
     }
 

@@ -116,6 +116,8 @@ export function readMetadata(dataDir: string, sessionId: SessionId): SessionMeta
     dashboardPort: raw["dashboardPort"] ? Number(raw["dashboardPort"]) : undefined,
     terminalWsPort: raw["terminalWsPort"] ? Number(raw["terminalWsPort"]) : undefined,
     directTerminalWsPort: raw["directTerminalWsPort"] ? Number(raw["directTerminalWsPort"]) : undefined,
+    provider: raw["provider"],
+    providerConfig: raw["providerConfig"],
   };
 }
 
@@ -164,6 +166,8 @@ export function writeMetadata(
     data["terminalWsPort"] = String(metadata.terminalWsPort);
   if (metadata.directTerminalWsPort !== undefined)
     data["directTerminalWsPort"] = String(metadata.directTerminalWsPort);
+  if (metadata.provider) data["provider"] = metadata.provider;
+  if (metadata.providerConfig) data["providerConfig"] = metadata.providerConfig;
 
   atomicWriteFileSync(path, serializeMetadata(data));
 }

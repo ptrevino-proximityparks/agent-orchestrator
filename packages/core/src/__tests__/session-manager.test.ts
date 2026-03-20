@@ -28,12 +28,17 @@ let mockAgent: Agent;
 let mockWorkspace: Workspace;
 let mockRegistry: PluginRegistry;
 let config: OrchestratorConfig;
+let originalAnthropicApiKey: string | undefined;
 
 function makeHandle(id: string): RuntimeHandle {
   return { id, runtimeName: "mock", data: {} };
 }
 
 beforeEach(() => {
+  // Save and set mock ANTHROPIC_API_KEY for tests (required by spawn validation)
+  originalAnthropicApiKey = process.env["ANTHROPIC_API_KEY"];
+  process.env["ANTHROPIC_API_KEY"] = "sk-ant-test-key-for-unit-tests";
+
   tmpDir = join(tmpdir(), `ao-test-session-mgr-${randomUUID()}`);
   mkdirSync(tmpDir, { recursive: true });
 
@@ -124,6 +129,13 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Restore original ANTHROPIC_API_KEY
+  if (originalAnthropicApiKey === undefined) {
+    delete process.env["ANTHROPIC_API_KEY"];
+  } else {
+    process.env["ANTHROPIC_API_KEY"] = originalAnthropicApiKey;
+  }
+
   // Clean up hash-based directories in ~/.agent-orchestrator
   const projectBaseDir = getProjectBaseDir(configPath, join(tmpDir, "my-app"));
   if (existsSync(projectBaseDir)) {
@@ -1719,6 +1731,112 @@ describe("PluginRegistry.loadBuiltins importFn", () => {
     // Should have attempted to import builtin plugins via the provided importFn
     expect(importedPackages.length).toBeGreaterThan(0);
     expect(importedPackages).toContain("@composio/ao-plugin-runtime-tmux");
+  });
+});
+
+describe("provider metadata", () => {
+  it("writes provider='anthropic' by default when spawning", async () => {
+    const sm = createSessionManager({ config, registry: mockRegistry });
+
+    await sm.spawn({ projectId: "my-app" });
+
+    const meta = readMetadataRaw(sessionsDir, "app-1");
+    expect(meta).not.toBeNull();
+    expect(meta!["provider"]).toBe("anthropic");
+    expect(meta!["providerConfig"]).toBeUndefined();
+  });
+
+  it("writes provider='ollama' and providerConfig when project has ollama provider", async () => {
+    const configWithOllama = {
+      ...config,
+      projects: {
+        ...config.projects,
+        "my-app": {
+          ...config.projects["my-app"],
+          provider: {
+            type: "ollama" as const,
+            model: "qwen3:8b",
+            endpoint: "http://localhost:11434",
+          },
+        },
+      },
+    };
+
+    const sm = createSessionManager({ config: configWithOllama, registry: mockRegistry });
+
+    await sm.spawn({ projectId: "my-app" });
+
+    const meta = readMetadataRaw(sessionsDir, "app-1");
+    expect(meta).not.toBeNull();
+    expect(meta!["provider"]).toBe("ollama");
+    expect(meta!["providerConfig"]).toBeDefined();
+
+    const providerConfig = JSON.parse(meta!["providerConfig"]!);
+    expect(providerConfig.type).toBe("ollama");
+    expect(providerConfig.model).toBe("qwen3:8b");
+    expect(providerConfig.endpoint).toBe("http://localhost:11434");
+  });
+
+  it("writes provider metadata when spawning orchestrator", async () => {
+    const configWithOllama = {
+      ...config,
+      projects: {
+        ...config.projects,
+        "my-app": {
+          ...config.projects["my-app"],
+          provider: {
+            type: "ollama" as const,
+            model: "llama3:70b",
+          },
+        },
+      },
+    };
+
+    const sm = createSessionManager({ config: configWithOllama, registry: mockRegistry });
+
+    await sm.spawnOrchestrator({ projectId: "my-app" });
+
+    const meta = readMetadataRaw(sessionsDir, "app-orchestrator");
+    expect(meta).not.toBeNull();
+    expect(meta!["provider"]).toBe("ollama");
+    expect(meta!["providerConfig"]).toBeDefined();
+
+    const providerConfig = JSON.parse(meta!["providerConfig"]!);
+    expect(providerConfig.type).toBe("ollama");
+    expect(providerConfig.model).toBe("llama3:70b");
+  });
+
+  it("preserves provider metadata when restoring from archive", async () => {
+    const wsPath = join(tmpDir, "ws-app-1");
+    mkdirSync(wsPath, { recursive: true });
+
+    const providerConfig = JSON.stringify({
+      type: "ollama",
+      model: "qwen3:8b",
+      endpoint: "http://custom:11434",
+    });
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: wsPath,
+      branch: "feat/TEST-1",
+      status: "killed",
+      project: "my-app",
+      provider: "ollama",
+      providerConfig,
+      runtimeHandle: JSON.stringify(makeHandle("rt-old")),
+    });
+
+    // Archive it
+    deleteMetadata(sessionsDir, "app-1");
+    expect(readMetadataRaw(sessionsDir, "app-1")).toBeNull();
+
+    // Restore should preserve provider metadata
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    await sm.restore("app-1");
+
+    const meta = readMetadataRaw(sessionsDir, "app-1");
+    expect(meta!["provider"]).toBe("ollama");
+    expect(meta!["providerConfig"]).toBe(providerConfig);
   });
 });
 

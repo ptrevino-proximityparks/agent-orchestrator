@@ -1323,6 +1323,18 @@ export interface SessionMetadata {
   dashboardPort?: number;
   terminalWsPort?: number;
   directTerminalWsPort?: number;
+  /**
+   * Provider type used for this session ("anthropic" | "ollama").
+   * Immutable after session creation — sessions continue using their
+   * original provider even if the project config changes.
+   * Sessions created before provider tracking show "legacy".
+   */
+  provider?: string;
+  /**
+   * JSON-serialized provider configuration (model, endpoint).
+   * Preserves the exact config used at spawn time for traceability.
+   */
+  providerConfig?: string;
 }
 
 // =============================================================================

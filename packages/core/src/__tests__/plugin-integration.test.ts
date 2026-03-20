@@ -63,6 +63,7 @@ let mockAgent: Agent;
 let mockWorkspace: Workspace;
 let config: OrchestratorConfig;
 let project: OrchestratorConfig["projects"][string];
+let originalAnthropicApiKey: string | undefined;
 
 function makeHandle(id: string): RuntimeHandle {
   return { id, runtimeName: "mock", data: {} };
@@ -108,6 +109,10 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 
 beforeEach(() => {
   vi.clearAllMocks();
+
+  // Save and set mock ANTHROPIC_API_KEY for tests (required by spawn validation)
+  originalAnthropicApiKey = process.env["ANTHROPIC_API_KEY"];
+  process.env["ANTHROPIC_API_KEY"] = "sk-ant-test-key-for-unit-tests";
 
   tmpDir = join(tmpdir(), `ao-test-plugin-int-${randomUUID()}`);
   mkdirSync(tmpDir, { recursive: true });
@@ -186,6 +191,13 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Restore original ANTHROPIC_API_KEY
+  if (originalAnthropicApiKey === undefined) {
+    delete process.env["ANTHROPIC_API_KEY"];
+  } else {
+    process.env["ANTHROPIC_API_KEY"] = originalAnthropicApiKey;
+  }
+
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
